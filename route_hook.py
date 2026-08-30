@@ -41,7 +41,7 @@ def handle_request():
         service = ClientService()
         ip = public.GetClientIp()
         if request.method == 'GET' and action == 'health':
-            return response({'status': True, 'data': {'service': 'CertHub', 'version': '0.9.0'}})
+            return response({'status': True, 'data': {'service': 'CertHub', 'version': '1.0.0'}})
         if request.method == 'GET' and action == 'author_avatar':
             path = os.path.join(PLUGIN_DIR, 'assets', 'kot4ri.jpg')
             with open(path, 'rb') as handle:
@@ -71,7 +71,8 @@ def handle_request():
             allowed = {
                 'dashboard', 'discover_local', 'complete_onboarding', 'skip_onboarding', 'import_local', 'sync_now', 'certificates',
                 'remove_certificate', 'clients', 'create_client', 'update_client', 'revoke_client', 'restore_client', 'delete_client', 'reissue_enrollment',
-                'save_grant', 'grants', 'save_settings', 'pull_events', 'clear_pull_events', 'reset_database', 'force_sync_clients', 'update_clients'
+                'save_grant', 'grants', 'save_settings', 'pull_events', 'clear_pull_events', 'reset_database', 'force_sync_clients', 'update_clients',
+                'check_update', 'install_update'
             }
             if method not in allowed:
                 return response({'status': False, 'msg': '管理操作不存在'}, 404)

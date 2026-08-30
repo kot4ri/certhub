@@ -4,8 +4,15 @@ from __future__ import absolute_import
 import json
 import hashlib
 import os
+import re
+import shutil
+import stat
+import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
+import zipfile
 
 PANEL_DIR = '/www/server/panel'
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +26,8 @@ from core import CertificateScanner, CertHubError, ClientService, connect, initi
 
 
 class certhub_main(object):
+    RELEASE_API = 'https://api.github.com/repos/kot4ri/certhub/releases/latest'
+    UPDATE_ROOT = '/www/server/certhub/updates'
     def __init__(self):
         initialize()
 
@@ -345,6 +354,114 @@ class certhub_main(object):
                 db.execute('DELETE FROM settings')
                 db.execute("DELETE FROM sqlite_sequence WHERE name IN ('certificates','clients','enrollments','grants','pull_events','audit_logs')")
             return self.ok(None, '数据库已完全重置')
+        return self.guard(run)
+
+    @staticmethod
+    def _version_tuple(value):
+        match = re.match(r'^v?(\d+)\.(\d+)\.(\d+)$', str(value or '').strip())
+        if not match:
+            raise CertHubError('版本号格式无效：%s' % value)
+        return tuple(int(part) for part in match.groups())
+
+    def _release_info(self):
+        request = urllib.request.Request(
+            self.RELEASE_API,
+            headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'CertHub-Panel-Updater'}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read(1024 * 1024).decode('utf-8'))
+        except Exception as exc:
+            raise CertHubError('无法连接 GitHub 检查更新：%s' % exc)
+        latest = str(payload.get('tag_name') or '').lstrip('v')
+        self._version_tuple(latest)
+        with open(os.path.join(PLUGIN_DIR, 'info.json'), 'r', encoding='utf-8') as handle:
+            current = str(json.load(handle).get('versions') or '')
+        self._version_tuple(current)
+        expected_zip = 'certhub-%s.zip' % latest
+        assets = {str(item.get('name')): str(item.get('browser_download_url'))
+                  for item in payload.get('assets', []) if item.get('name') and item.get('browser_download_url')}
+        return {
+            'current_version': current,
+            'latest_version': latest,
+            'update_available': self._version_tuple(latest) > self._version_tuple(current),
+            'release_url': str(payload.get('html_url') or ''),
+            'published_at': str(payload.get('published_at') or ''),
+            'zip_name': expected_zip,
+            'zip_url': assets.get(expected_zip, ''),
+            'checksum_url': assets.get(expected_zip + '.sha256', '')
+        }
+
+    def check_update(self, get):
+        return self.guard(lambda: self.ok(self._release_info(), '更新检查完成'))
+
+    @staticmethod
+    def _download(url, target, limit):
+        request = urllib.request.Request(url, headers={'User-Agent': 'CertHub-Panel-Updater'})
+        with urllib.request.urlopen(request, timeout=45) as response, open(target, 'wb') as output:
+            total = 0
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                total += len(block)
+                if total > limit:
+                    raise CertHubError('更新文件超过允许大小')
+                output.write(block)
+
+    def install_update(self, get):
+        def run():
+            release = self._release_info()
+            if not release['update_available']:
+                return self.ok(release, '当前已是最新版本')
+            if not release['zip_url'] or not release['checksum_url']:
+                raise CertHubError('Release 缺少插件包或校验文件')
+            os.makedirs(self.UPDATE_ROOT, mode=0o700, exist_ok=True)
+            stage = tempfile.mkdtemp(prefix='certhub-', dir=self.UPDATE_ROOT)
+            archive = os.path.join(stage, 'package.zip')
+            checksum_file = os.path.join(stage, 'package.sha256')
+            try:
+                self._download(release['zip_url'], archive, 100 * 1024 * 1024)
+                self._download(release['checksum_url'], checksum_file, 4096)
+                expected = open(checksum_file, 'r', encoding='utf-8').read().strip().split()[0].lower()
+                if not re.match(r'^[0-9a-f]{64}$', expected):
+                    raise CertHubError('Release 校验文件格式无效')
+                digest = hashlib.sha256()
+                with open(archive, 'rb') as source:
+                    for block in iter(lambda: source.read(1024 * 1024), b''):
+                        digest.update(block)
+                if digest.hexdigest() != expected:
+                    raise CertHubError('更新包 SHA-256 校验失败')
+                extract_dir = os.path.join(stage, 'extracted')
+                os.makedirs(extract_dir, mode=0o700)
+                with zipfile.ZipFile(archive) as package:
+                    total = 0
+                    for item in package.infolist():
+                        normalized = item.filename.replace('\\', '/')
+                        parts = normalized.split('/')
+                        mode = item.external_attr >> 16
+                        if (not normalized or normalized.startswith('/') or '..' in parts or
+                                stat.S_ISLNK(mode) or parts[0] != 'certhub'):
+                            raise CertHubError('更新包包含不安全路径')
+                        total += item.file_size
+                        if total > 250 * 1024 * 1024:
+                            raise CertHubError('更新包解压后超过允许大小')
+                    package.extractall(extract_dir)
+                source_dir = os.path.join(extract_dir, 'certhub')
+                with open(os.path.join(source_dir, 'info.json'), 'r', encoding='utf-8') as handle:
+                    packaged_version = str(json.load(handle).get('versions') or '')
+                if packaged_version != release['latest_version']:
+                    raise CertHubError('更新包版本与 Release 不一致')
+                subprocess.Popen(
+                    [os.path.join(PLUGIN_DIR, 'update.sh'), 'apply', stage],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    close_fds=True, start_new_session=True
+                )
+                audit('plugin.update', 'plugin', release['latest_version'])
+                return self.ok(release, '更新已启动，面板即将重启')
+            except Exception:
+                shutil.rmtree(stage, ignore_errors=True)
+                raise
         return self.guard(run)
 
     def download_file(self, name):

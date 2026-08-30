@@ -28,7 +28,7 @@ install_certhub() {
     if [[ "${CERTHUB_SKIP_RESTART:-0}" != "1" ]]; then
         nohup bash -c 'sleep 3; /etc/init.d/bt restart' >/dev/null 2>&1 &
     fi
-    echo 'CertHub 0.9.0 安装完成。面板将在数秒后重启并注册 /certhub-api。'
+    echo 'CertHub 1.0.0 安装完成。面板将在数秒后重启并注册 /certhub-api。'
 }
 
 uninstall_certhub() {

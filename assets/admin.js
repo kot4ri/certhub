@@ -1082,6 +1082,69 @@
             '" placeholder="0 * * * *"><p class="muted">使用 crontab 五段格式，只作为新增客户端的默认值，不修改已有客户端。</p></div><div class="row"><label>日志保存时间（天）</label><input type="number" id="retention" min="1" max="3650" value="' +
             esc(d.pull_retention_days || 30) +
             '"><p class="muted">默认保存 30 天，客户端产生新日志时自动删除过期日志。</p></div><button class="btn" id="saveSettings">保存设置</button><span id="settingsSaved" class="good" style="display:none;margin-left:12px">设置已保存</span></div><div class="panel" style="margin-top:16px"><h3>数据维护</h3><p><button class="btn danger" id="clearEvents">清空日志</button></p><p class="muted">只删除日志，不影响客户端、证书、授权或设置。</p><hr><p><button class="btn danger" id="resetDatabase">完全重置数据库</button></p><p class="bad">永久删除全部客户端身份、纳管证书、授权、日志、审计记录和设置。</p></div><div class="panel" style="margin-top:16px"><h3 style="margin-top:0">关于</h3><div style="display:flex;align-items:center;gap:18px"><img src="/certhub-api?action=author_avatar" alt="白川枫" width="72" height="72" style="border-radius:50%;object-fit:cover;border:1px solid #e5e7eb"><div><b style="font-size:16px">白川枫</b><p class="muted" style="margin:5px 0 10px">@kot4ri · CertHub 作者</p><div style="display:flex;align-items:center;gap:12px"><a href="https://github.com/kot4ri" target="_blank" rel="noopener noreferrer" title="GitHub" aria-label="GitHub" style="display:inline-flex;color:#24292f"><svg width="25" height="25" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.4-1.27.74-1.56-2.57-.29-5.27-1.28-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18a10.97 10.97 0 0 1 5.75 0c2.19-1.49 3.16-1.18 3.16-1.18.63 1.58.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg></a><a href="https://zankyo.cc" target="_blank" rel="noopener noreferrer" title="zankyo.cc" aria-label="zankyo.cc" style="display:inline-flex;color:#20a53a"><svg width="25" height="25" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2.8 12h18.4M12 2.5c2.5 2.7 3.8 5.9 3.8 9.5S14.5 18.8 12 21.5C9.5 18.8 8.2 15.6 8.2 12S9.5 5.2 12 2.5Z" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></a></div></div></div></div>';
+          const aboutDescription = main.lastElementChild.querySelector("p.muted");
+          aboutDescription.innerHTML =
+            '@kot4ri · <a href="https://github.com/kot4ri/certhub" target="_blank" rel="noopener noreferrer">查看本项目</a>';
+          const updatePanel = document.createElement("div");
+          updatePanel.className = "panel update-panel";
+          updatePanel.innerHTML =
+            '<div class="update-heading"><div><h3>插件更新</h3><p class="muted">自动检查 GitHub Release，并在安装前校验更新包。</p></div><span id="updateBadge" class="update-badge loading">检查中</span></div><div class="update-versions"><div class="version-card"><span>当前版本</span><strong id="currentVersion">—</strong></div><div class="version-arrow">→</div><div class="version-card"><span>最新版本</span><strong id="latestVersion">—</strong></div></div><div class="update-footer"><span id="updateMessage" class="muted">正在连接 GitHub…</span><div class="update-actions"><a id="releaseLink" class="btn btn-secondary" target="_blank" rel="noopener noreferrer" style="display:none">查看版本</a><button class="btn btn-secondary" id="checkUpdate">重新检查</button><button class="btn" id="installUpdate" style="display:none">立即更新</button></div></div>';
+          main.insertBefore(updatePanel, main.lastElementChild);
+          const loadUpdate = () => {
+            const checkButton = document.getElementById("checkUpdate"),
+              installButton = document.getElementById("installUpdate"),
+              badge = document.getElementById("updateBadge"),
+              message = document.getElementById("updateMessage"),
+              releaseLink = document.getElementById("releaseLink");
+            checkButton.disabled = true;
+            badge.className = "update-badge loading";
+            badge.textContent = "检查中";
+            message.textContent = "正在连接 GitHub…";
+            api("check_update")
+              .then((update) => {
+                document.getElementById("currentVersion").textContent = update.current_version;
+                document.getElementById("latestVersion").textContent = update.latest_version;
+                releaseLink.href = update.release_url;
+                releaseLink.style.display = update.release_url ? "inline-flex" : "none";
+                if (update.update_available) {
+                  badge.className = "update-badge available";
+                  badge.textContent = "发现新版本";
+                  message.textContent = "新版本已发布，可以立即更新。";
+                  installButton.style.display = "inline-flex";
+                } else {
+                  badge.className = "update-badge current";
+                  badge.textContent = "已是最新";
+                  message.textContent = "当前已是最新版本。";
+                  installButton.style.display = "none";
+                }
+              })
+              .catch((error) => {
+                badge.className = "update-badge error";
+                badge.textContent = "检查失败";
+                message.textContent = error.message || String(error);
+                installButton.style.display = "none";
+              })
+              .finally(() => (checkButton.disabled = false));
+          };
+          document.getElementById("checkUpdate").onclick = loadUpdate;
+          document.getElementById("installUpdate").onclick = (event) => {
+            if (!confirm("更新会覆盖当前插件文件并重启宝塔面板，确定继续？")) return;
+            const button = event.currentTarget;
+            button.disabled = true;
+            button.textContent = "准备更新…";
+            api("install_update")
+              .then(() => {
+                document.getElementById("updateMessage").textContent = "更新已启动，面板即将重启，请稍候…";
+                button.textContent = "正在更新";
+                setTimeout(() => location.reload(), 15000);
+              })
+              .catch((error) => {
+                button.disabled = false;
+                button.textContent = "立即更新";
+                alert(error.message || error);
+              });
+          };
+          loadUpdate();
           document.getElementById("saveSettings").onclick = (e) => {
             const button = e.currentTarget,
               hint = document.getElementById("settingsSaved");
