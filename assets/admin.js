@@ -643,7 +643,7 @@
               const lastIp = String(r.last_ip || "-"),
                 shortenedIp = lastIp.includes(":") && lastIp.length > 20,
                 ipDisplay = shortenedIp
-                  ? '<span class="hover-detail" tabindex="0" data-tip="' + esc(lastIp) + '">' + esc(lastIp.slice(0, 20)) + "</span>"
+                  ? '<span class="hover-detail" tabindex="0" data-tip="' + esc(lastIp) + '">' + esc(lastIp.slice(0, 20)) + "...</span>"
                   : esc(lastIp),
                 outdated =
                   r.status === "active" &&
