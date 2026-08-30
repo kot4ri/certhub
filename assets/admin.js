@@ -600,7 +600,11 @@
                   ? '<span class="good" title="' +
                     esc(localTime(r.force_sync_completed_at)) +
                     '">已执行</span>'
-                  : "未下发",
+                  : r.last_seen_at
+                    ? '<span class="good" title="' +
+                      esc(localTime(r.last_seen_at)) +
+                      '">已执行</span>'
+                    : "未执行",
             updateStatus = (r) =>
               r.update_token
                 ? '<span class="note" title="' +
@@ -676,9 +680,13 @@
                 forceStatus(r) +
                 '</span><span class="task-chip"><b>更新</b>' +
                 updateStatus(r) +
-                '</span><span class="task-chip"><b>清理</b>' +
-                cleanupStatus(r) +
-                '</span></div></td><td><div class="cell-lines"><span class="ellipsis" title="' +
+                "</span>" +
+                (r.cleanup_token
+                  ? '<span class="task-chip"><b>清理</b>' +
+                    cleanupStatus(r) +
+                    "</span>"
+                  : "") +
+                '</div></td><td><div class="cell-lines"><span class="ellipsis" title="' +
                 esc(r.hostname || "-") +
                 '">' +
                 esc(r.hostname || "-") +
@@ -881,6 +889,8 @@
                           esc(r.agent_version || "-") +
                           " · 最后在线 " +
                           esc(localTime(r.last_seen_at)) +
+                          ' · 清理 ' +
+                          cleanupStatus(r) +
                           '</span></div><div><button class="btn modal-restore" data-id="' +
                           r.id +
                           '">恢复</button> <button class="btn danger modal-delete" data-id="' +
