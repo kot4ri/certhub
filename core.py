@@ -601,9 +601,16 @@ class ClientService(object):
 
     def acknowledge_update(self, client_id, command_token):
         with connect() as db:
-            row = db.execute('SELECT update_token,agent_version FROM clients WHERE id=?', (client_id,)).fetchone()
+            row = db.execute('SELECT update_token,platform,agent_version FROM clients WHERE id=?', (client_id,)).fetchone()
             if row and row['update_token'] and secrets.compare_digest(row['update_token'], str(command_token or '')):
-                db.execute('UPDATE clients SET update_token=NULL,update_completed_at=?,update_completed_version=? WHERE id=?', (utcnow(), row['agent_version'], client_id))
+                target_version = row['agent_version']
+                try:
+                    with open(os.path.join(PLUGIN_DIR, 'info.json'), 'r', encoding='utf-8') as handle:
+                        info = json.load(handle)
+                    target_version = info.get(str(row['platform']) + '_agent_version') or target_version
+                except (OSError, ValueError, TypeError):
+                    pass
+                db.execute('UPDATE clients SET update_token=NULL,update_completed_at=?,update_completed_version=? WHERE id=?', (utcnow(), target_version, client_id))
 
     def acknowledge_cleanup(self, client_id, command_token):
         with connect() as db:
