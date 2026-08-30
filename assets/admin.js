@@ -304,103 +304,87 @@
           ">›</button></nav>"
         );
       }
-      async function local(pageArg = 1) {
-        try {
-          const rows = await api("discover_local"),
-            pages = Math.max(1, Math.ceil(rows.length / 10)),
-            page = Math.min(pages, Math.max(1, Number(pageArg) || 1)),
-            pageRows = rows.slice((page - 1) * 10, page * 10);
-          main.innerHTML =
-            '<div class="toolbar client-toolbar"><div class="client-heading"><h2>本地证书</h2><p>扫描宝塔面板证书目录，共 ' +
-            rows.length +
-            ' 条</p></div></div><div class="client-batch-bar"><button class="btn" id="scan">重新扫描</button></div><table><tr><th>名称</th><th>路径</th><th>域名</th><th>品牌/类型</th><th>有效期</th><th>状态</th><th>操作</th></tr>' +
-            pageRows
-              .map(
-                (r, i) =>
-                  "<tr><td>" +
-                  esc(r.name) +
-                  "</td><td>" +
-                  esc(r.path) +
-                  "</td><td>" +
-                  esc((r.sans || []).join(", ")) +
-                  "</td><td><b>" +
-                  esc(r.issuer_brand || "未知") +
-                  '</b><br><span class="muted">' +
-                  esc(r.validation_type || "未知") +
-                  '</span></td><td><span class="muted">起</span> ' +
-                  esc(localTime(r.not_before)) +
-                  '<br><span class="muted">止</span> ' +
-                  esc(localTime(r.not_after)) +
-                  '</td><td class="' +
-                  (r.error ? "bad" : "good") +
-                  '">' +
-                  esc(r.error || "有效") +
-                  "</td><td>" +
-                  (r.managed
-                    ? "已纳管"
-                    : '<button class="btn manage" data-i="' +
-                      i +
-                      '">纳管</button>') +
-                  "</td></tr>",
-              )
-              .join("") +
-            "</table>" +
-            tablePager("local-pagination", page, pages);
-          document.getElementById("scan").onclick = () => local(page);
-          main
-            .querySelectorAll(".local-pagination button:not(:disabled)")
-            .forEach((b) => (b.onclick = () => local(Number(b.dataset.page))));
-          main.querySelectorAll(".manage").forEach(
-            (b) =>
-              (b.onclick = () => {
-                const r = pageRows[Number(b.dataset.i)];
-                api("import_local", { path: r.path, name: r.name })
-                  .then(() => local(page))
-                  .catch(fail);
-              }),
-          );
-        } catch (e) {
-          fail(e);
-        }
-      }
       async function certificates(pageArg = 1) {
         try {
-          const rows = await api("certificates"),
+          const [localRows, managedRows] = await Promise.all([
+              api("discover_local"),
+              api("certificates"),
+            ]),
+            managedByPath = new Map(
+              managedRows.map((item) => [item.source_path, item]),
+            ),
+            localPaths = new Set(localRows.map((item) => item.path)),
+            rows = localRows
+              .map((item) => ({
+                ...item,
+                managedRecord: managedByPath.get(item.path) || null,
+              }))
+              .concat(
+                managedRows
+                  .filter((item) => !localPaths.has(item.source_path))
+                  .map((item) => ({
+                    name: item.name,
+                    path: item.source_path,
+                    error: item.last_error || "源证书目录当前不可用",
+                    managedRecord: item,
+                  })),
+              )
+              .sort((a, b) =>
+                String(a.name || "").localeCompare(String(b.name || ""), "zh-CN"),
+              ),
+            managedCount = rows.filter((item) => item.managedRecord).length,
             pages = Math.max(1, Math.ceil(rows.length / 10)),
             page = Math.min(pages, Math.max(1, Number(pageArg) || 1)),
             pageRows = rows.slice((page - 1) * 10, page * 10);
           main.innerHTML =
-            '<div class="toolbar client-toolbar"><div class="client-heading"><h2>纳管证书</h2><p>查看并维护已纳管证书，共 ' +
+            '<div class="toolbar client-toolbar"><div class="client-heading"><h2>证书管理</h2><p>宝塔本地证书共 ' +
             rows.length +
-            ' 条</p></div></div><div class="client-batch-bar"><button class="btn" id="check">检查全部</button></div><table><tr><th>名称</th><th>主题/SAN</th><th>来源</th><th>品牌/类型</th><th>有效期</th><th>状态</th><th>操作</th></tr>' +
+            " 张，已纳管 " +
+            managedCount +
+            ' 张</p></div></div><div class="client-batch-bar"><button class="btn" id="scan">重新扫描</button><button class="btn" id="check">检查已纳管证书</button></div><table><tr><th>名称</th><th>域名</th><th>来源</th><th>品牌/类型</th><th>有效期</th><th>纳管状态</th><th>操作</th></tr>' +
             pageRows
               .map(
-                (r) =>
+                (r, index) => {
+                  const managed = r.managedRecord,
+                    detail = managed || r,
+                    error = r.error || (managed && managed.last_error);
+                  return (
                   "<tr><td>" +
                   esc(r.name) +
                   "</td><td>" +
-                  esc(r.subject_name) +
-                  '<br><span class="muted">' +
-                  esc((r.sans || []).join(", ")) +
-                  "</span></td><td>" +
-                  esc(r.source_path) +
-                  "</td><td><b>" +
-                  esc(r.issuer_brand || "未知") +
-                  '</b><br><span class="muted">' +
-                  esc(r.validation_type || "未知") +
-                  '</span></td><td><span class="muted">起</span> ' +
-                  esc(localTime(r.not_before)) +
-                  '<br><span class="muted">止</span> ' +
-                  esc(localTime(r.not_after)) +
+                  esc((detail.sans || []).join(", ") || detail.subject_name || "-") +
                   "</td><td>" +
-                  esc(r.last_error || "正常") +
-                  '</td><td><button class="btn danger remove" data-id="' +
-                  r.id +
-                  '">取消纳管</button></td></tr>',
+                  esc(r.path) +
+                  "</td><td><b>" +
+                  esc(detail.issuer_brand || "未知") +
+                  '</b><br><span class="muted">' +
+                  esc(detail.validation_type || "未知") +
+                  '</span></td><td><span class="muted">起</span> ' +
+                  esc(localTime(detail.not_before)) +
+                  '<br><span class="muted">止</span> ' +
+                  esc(localTime(detail.not_after)) +
+                  '</td><td><span class="' +
+                  (error ? "bad" : managed ? "good" : "muted") +
+                  '">' +
+                  esc(error || (managed ? "已纳管" : "未纳管")) +
+                  "</span></td><td>" +
+                  (managed
+                    ? '<button class="btn danger remove" data-id="' +
+                      managed.id +
+                      '">取消纳管</button>'
+                    : error
+                      ? "-"
+                      : '<button class="btn manage" data-i="' +
+                        index +
+                        '">纳管</button>') +
+                  "</td></tr>"
+                  );
+                },
               )
               .join("") +
             "</table>" +
             tablePager("certificate-pagination", page, pages);
+          document.getElementById("scan").onclick = () => certificates(page);
           document.getElementById("check").onclick = () =>
             api("sync_now").then(() => certificates(page));
           main
@@ -418,6 +402,15 @@
                     certificates(page),
                   )),
             );
+          main.querySelectorAll(".manage").forEach(
+            (b) =>
+              (b.onclick = () => {
+                const row = pageRows[Number(b.dataset.i)];
+                api("import_local", { path: row.path, name: row.name })
+                  .then(() => certificates(page))
+                  .catch(fail);
+              }),
+          );
         } catch (e) {
           fail(e);
         }
@@ -1381,7 +1374,7 @@
               });
           };
         document.getElementById("skipOnboarding").onclick = () =>
-          confirm("跳过后仍可在本地证书和客户端管理页面完成配置。确定跳过？") &&
+          confirm("跳过后仍可在证书管理和客户端管理页面完成配置。确定跳过？") &&
           api("skip_onboarding")
             .then(finish)
             .catch((x) => alert(x.message || x));
@@ -1401,7 +1394,6 @@
       }
       const pages = {
         dashboard,
-        local,
         certificates,
         clients,
         events,
