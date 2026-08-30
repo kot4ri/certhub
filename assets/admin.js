@@ -397,7 +397,7 @@
             .forEach(
               (b) =>
                 (b.onclick = () =>
-                  confirm("仅取消纳管，不删除源证书。继续？") &&
+                  confirm("取消纳管不会删除服务端源证书；已下发客户端将在下次同步时删除由 CertHub 保存的受管副本。已自动替换的网站证书不会回滚。确定继续？") &&
                   api("remove_certificate", { id: b.dataset.id }).then(() =>
                     certificates(page),
                   )),
@@ -753,7 +753,7 @@
           main.innerHTML =
             '<div class="toolbar client-toolbar"><div class="client-heading"><h2>客户端管理</h2><p>管理客户端权限、同步任务与 Agent 更新</p></div></div><div class="client-batch-bar"><div class="action-menu" id="clientActionMenu"><button class="btn btn-secondary action-menu-trigger" id="clientMore" type="button">批量操作 <svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></svg></button><div class="action-menu-popover" style="left:0;right:auto"><button id="forceSync" type="button"><span>立即拉取证书</span></button><button id="updateClients" type="button"><span>更新选中客户端</span></button></div></div><button class="btn" id="add">新增客户端</button><button class="btn btn-secondary" id="revokedClients">已撤销列表（' +
             revokedRows.length +
-            '）</button></div><table class="client-table"><tr><th><input type="checkbox" id="selectAll" aria-label="全选"></th><th>客户端</th><th>配置</th><th>任务状态</th><th>系统信息/版本</th><th>最后在线</th><th>状态</th><th>操作</th></tr>' +
+            '）</button><button class="btn btn-secondary" id="refreshClients" type="button">刷新</button></div><table class="client-table"><tr><th><input type="checkbox" id="selectAll" aria-label="全选"></th><th>客户端</th><th>配置</th><th>任务状态</th><th>系统信息/版本</th><th>最后在线</th><th>状态</th><th>操作</th></tr>' +
             managedHtml +
             "</table>" +
             clientPager;
@@ -779,6 +779,10 @@
           };
           actionMenu.querySelector(".action-menu-popover").onclick = (e) =>
             e.stopPropagation();
+          document.getElementById("refreshClients").onclick = (e) => {
+            e.currentTarget.disabled = true;
+            clients(clientPage);
+          };
           document.getElementById("selectAll").onchange = (e) =>
             selectable.forEach((x) => (x.checked = e.currentTarget.checked));
           document.getElementById("forceSync").onclick = () => {
