@@ -8,7 +8,7 @@ POLL_SECONDS=300
 cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
 system_json(){ python3 - <<'PY'
 import json,platform
-i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.11'}
+i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.12'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
@@ -46,7 +46,7 @@ for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
 PY
 )
   if [[ -n ${update_info[0]:-} ]]; then
-    if [[ ${update_info[1]} == 0.3.11 ]]; then
+    if [[ ${update_info[1]} == 0.3.12 ]]; then
       payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
       curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
     else
@@ -203,14 +203,15 @@ if deploy_mode=='custom':
  managed_path=target
 elif deploy_mode=='bt-panel':
  panel='/www/server/panel';py=panel+'/pyenv/bin/python3'
- if not os.path.isfile(py):raise SystemExit('客户端未安装宝塔面板')
  subject=(d.get('subject') or d.get('name') or cert_id).lower();subject=subject[2:] if subject.startswith('*.') else subject;folder=re.sub(r'[^a-z0-9._-]','_',subject);legacy=panel+'/vhost/ssl/'+folder
  atomic_copy(final+'/fullchain.pem',legacy+'/fullchain.pem',0o644);atomic_copy(final+'/privkey.pem',legacy+'/privkey.pem',0o600)
  decoded=ssl._ssl._test_decode_cert(final+'/fullchain.pem');sans=sorted(v.lower() for k,v in decoded.get('subjectAltName',[]) if k=='DNS');cn=next((v for group in decoded.get('subject',[]) for k,v in group if k=='commonName'),subject)
  info={'issuer':'CertHub','issuer_O':'CertHub','notAfter':time.strftime('%Y-%m-%d',time.gmtime(ssl.cert_time_to_seconds(decoded['notAfter']))),'notBefore':decoded.get('notBefore'),'dns':sans,'subject':cn,'endtime':int((ssl.cert_time_to_seconds(decoded['notAfter'])-time.time())/86400)}
  open(legacy+'/info.json','w').write(json.dumps(info,separators=(',',':')));os.chmod(legacy+'/info.json',0o644)
  managed_path=legacy
- subprocess.run([py,'-c','import sys;sys.path.insert(0,"/www/server/panel/class");from ssl_manage import SSLManger;SSLManger().save_by_file(sys.argv[1],sys.argv[2])',final+'/fullchain.pem',final+'/privkey.pem'],check=True)
+ if os.path.isfile(py):
+  try:subprocess.run([py,'-c','import sys;sys.path.insert(0,"/www/server/panel/class");from ssl_manage import SSLManger;SSLManger().save_by_file(sys.argv[1],sys.argv[2])',final+'/fullchain.pem',final+'/privkey.pem'],check=True)
+  except Exception:pass
  if config.get('auto_deploy_sites'):
   def identity(path):
    try:

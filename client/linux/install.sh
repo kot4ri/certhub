@@ -8,7 +8,26 @@ CONFIG_DIR=/etc/certhub-agent
 STATE_DIR=/var/lib/certhub-agent
 
 [[ $EUID -eq 0 ]] || { echo '请使用 root 执行安装器。' >&2; exit 1; }
-for command_name in curl python3 openssl flock; do command -v "$command_name" >/dev/null || { echo "缺少 $command_name。" >&2; exit 1; }; done
+
+install_python3() {
+  command -v python3 >/dev/null && return 0
+  echo '未检测到 python3，正在安装运行依赖。' >&2
+  if command -v dnf >/dev/null; then
+    dnf install -y python3
+  elif command -v yum >/dev/null; then
+    yum install -y python3
+  elif command -v apt-get >/dev/null; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3
+  else
+    echo '未找到受支持的包管理器（dnf、yum 或 apt-get）。' >&2
+    return 1
+  fi
+  command -v python3 >/dev/null || { echo 'python3 安装完成后仍不可用。' >&2; return 1; }
+}
+
+install_python3
+for command_name in curl openssl flock; do command -v "$command_name" >/dev/null || { echo "缺少 $command_name。" >&2; exit 1; }; done
 [[ $API_ENDPOINT == https://* ]] || { echo '面板地址必须使用 HTTPS。' >&2; exit 1; }
 install -d -m 0700 "$CONFIG_DIR" "$STATE_DIR" "$STATE_DIR/certificates"
 
@@ -22,7 +41,7 @@ curl_with_ipv4_fallback() {
 system_file=$(mktemp "$CONFIG_DIR/.system.XXXXXX")
 python3 - "$system_file" <<'PY'
 import json,os,platform,sys
-info={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.11'}
+info={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.12'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='): info['os_version']=line.split('=',1)[1].strip().strip('"'); break
@@ -65,4 +84,4 @@ else
   exit 1
 fi
 rm -f "$agent_file" "$service_file"
-echo 'CertHub Agent 0.3.11 安装完成。'
+echo 'CertHub Agent 0.3.12 安装完成。'
