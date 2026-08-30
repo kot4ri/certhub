@@ -512,7 +512,11 @@
             const selected = (r.certificate_ids || []).map(
                 (id) => names.get(Number(id)) || "#" + id,
               ),
-              certText = selected.join("、") || "未授权";
+              certNames = selected.join("、"),
+              certText = selected.length === 1 ? selected[0] : selected.length > 1 ? selected.length + " 个" : "未授权",
+              certDisplay = selected.length > 1
+                ? '<span class="hover-detail" tabindex="0" data-tip="' + esc(certNames) + '">' + esc(certText) + "</span>"
+                : esc(certText);
             let destination;
             if (r.platform === "windows")
               destination =
@@ -527,10 +531,8 @@
               destination = r.download_path || "自定义目录";
             else destination = "服务托管证书目录";
             return (
-              '<div class="cell-lines"><span class="ellipsis" title="' +
-              esc(certText) +
-              '"><b>证书</b> ' +
-              esc(certText) +
+              '<div class="cell-lines"><span class="ellipsis"><b>证书</b> ' +
+              certDisplay +
               '</span><span class="ellipsis muted" title="' +
               esc(destination) +
               '">' +
@@ -587,7 +589,12 @@
             );
           const managedHtml = pageRows
             .map((r) => {
-              const outdated =
+              const lastIp = String(r.last_ip || "-"),
+                shortenedIp = lastIp.includes(":") && lastIp.length > 20,
+                ipDisplay = shortenedIp
+                  ? '<span class="hover-detail" tabindex="0" data-tip="' + esc(lastIp) + '">' + esc(lastIp.slice(0, 20)) + "</span>"
+                  : esc(lastIp),
+                outdated =
                   r.status === "active" &&
                   r.agent_version &&
                   r.latest_agent_version &&
@@ -635,7 +642,7 @@
                 "</b>" +
                 dot +
                 '</span></div></td><td><div class="cell-lines"><span>' +
-                esc(r.last_ip || "-") +
+                ipDisplay +
                 '</span><span class="muted">' +
                 esc(localTime(r.last_seen_at)) +
                 "</span></div></td><td>" +
@@ -648,9 +655,9 @@
                   : "") +
                 '<button class="btn edit" data-id="' +
                 r.id +
-                '">编辑权限范围</button> <button class="btn danger revoke" data-id="' +
+                '">编辑</button> <button class="btn danger revoke" data-id="' +
                 r.id +
-                '">撤销权限</button> <button class="btn danger delete" data-id="' +
+                '">撤权</button> <button class="btn danger delete" data-id="' +
                 r.id +
                 '">删除</button></td></tr>'
               );
@@ -695,7 +702,7 @@
           main.innerHTML =
             '<div class="toolbar client-toolbar"><div class="client-heading"><h2>客户端管理</h2><p>管理客户端权限、同步任务与 Agent 更新</p></div></div><div class="client-batch-bar"><div class="action-menu" id="clientActionMenu"><button class="btn btn-secondary action-menu-trigger" id="clientMore" type="button">批量操作 <svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></svg></button><div class="action-menu-popover" style="left:0;right:auto"><button id="forceSync" type="button"><span>立即拉取证书</span></button><button id="updateClients" type="button"><span>更新选中客户端</span></button></div></div><button class="btn" id="add">新增客户端</button><button class="btn btn-secondary" id="revokedClients">已撤销列表（' +
             revokedRows.length +
-            '）</button></div><table class="client-table"><tr><th><input type="checkbox" id="selectAll" aria-label="全选"></th><th>客户端</th><th>配置的客户端行为</th><th>任务状态</th><th>系统信息/版本</th><th>最后在线</th><th>状态</th><th>操作</th></tr>' +
+            '）</button></div><table class="client-table"><tr><th><input type="checkbox" id="selectAll" aria-label="全选"></th><th>客户端</th><th>配置</th><th>任务状态</th><th>系统信息/版本</th><th>最后在线</th><th>状态</th><th>操作</th></tr>' +
             managedHtml +
             "</table>" +
             clientPager;

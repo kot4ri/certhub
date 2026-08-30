@@ -495,6 +495,9 @@
       .quick-action i { display:grid; flex:0 0 38px; width:38px; height:38px; padding:9px; place-items:center; border-radius:10px; background:#eaf8f3; color:var(--green-dark); font-style:normal; }
       .api-url { padding:13px 14px; border:1px solid #e6eaf0; border-radius:10px; background:#f7f9fb; color:#526078; word-break:break-all; }
       .status-pulse { display:inline-block; width:8px; height:8px; margin-right:7px; border-radius:50%; background:#16b77e; box-shadow:0 0 0 0 rgba(22,183,126,.35); animation:pulse 2.2s infinite; }
+      .hover-detail { position:relative; display:inline-block; max-width:100%; border-bottom:1px dashed #aab3c1; cursor:default; }
+      .hover-detail:hover::after, .hover-detail:focus::after { content:attr(data-tip); position:absolute; z-index:80; left:0; bottom:calc(100% + 8px); width:max-content; max-width:min(420px,70vw); padding:8px 10px; border-radius:7px; background:#303640; color:#fff; font-size:12px; font-weight:400; line-height:1.55; white-space:normal; overflow-wrap:anywhere; box-shadow:0 8px 22px rgba(0,0,0,.22); }
+      .hover-detail:hover::before, .hover-detail:focus::before { content:""; position:absolute; z-index:81; left:12px; bottom:calc(100% + 3px); border:5px solid transparent; border-top-color:#303640; }
       .update-panel { margin-top:16px; overflow:hidden; }
       .update-heading, .update-footer { display:flex; align-items:center; justify-content:space-between; gap:18px; }
       .update-heading h3 { margin:0 0 5px; }
