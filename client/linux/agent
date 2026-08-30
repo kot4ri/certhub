@@ -8,7 +8,7 @@ POLL_SECONDS=300
 cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
 system_json(){ python3 - <<'PY'
 import json,platform
-i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.12'}
+i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.13'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
@@ -46,7 +46,7 @@ for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
 PY
 )
   if [[ -n ${update_info[0]:-} ]]; then
-    if [[ ${update_info[1]} == 0.3.12 ]]; then
+    if [[ ${update_info[1]} == 0.3.13 ]]; then
       payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
       curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
     else
