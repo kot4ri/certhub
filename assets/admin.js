@@ -26,6 +26,53 @@
                 hour12: false,
               }).format(d);
         };
+      let floatingTooltip = null,
+        floatingTooltipOwner = null;
+      const hideFloatingTooltip = () => {
+        if (floatingTooltip) floatingTooltip.remove();
+        floatingTooltip = null;
+        floatingTooltipOwner = null;
+      };
+      const showFloatingTooltip = (owner) => {
+        const message = owner && owner.dataset.tip;
+        if (!message || floatingTooltipOwner === owner) return;
+        hideFloatingTooltip();
+        const tip = document.createElement("div");
+        tip.className = "floating-tooltip";
+        tip.textContent = message;
+        tip.style.visibility = "hidden";
+        document.body.appendChild(tip);
+        const anchor = owner.getBoundingClientRect(),
+          bounds = tip.getBoundingClientRect(),
+          left = Math.max(
+            10,
+            Math.min(anchor.left, window.innerWidth - bounds.width - 10),
+          );
+        let top = anchor.top - bounds.height - 8;
+        if (top < 8) top = anchor.bottom + 8;
+        tip.style.left = left + "px";
+        tip.style.top = top + "px";
+        tip.style.visibility = "visible";
+        floatingTooltip = tip;
+        floatingTooltipOwner = owner;
+      };
+      document.addEventListener("mouseover", (event) => {
+        const owner = event.target.closest?.(".hover-detail");
+        if (owner) showFloatingTooltip(owner);
+      });
+      document.addEventListener("mouseout", (event) => {
+        const owner = event.target.closest?.(".hover-detail");
+        if (owner && !owner.contains(event.relatedTarget)) hideFloatingTooltip();
+      });
+      document.addEventListener("focusin", (event) => {
+        const owner = event.target.closest?.(".hover-detail");
+        if (owner) showFloatingTooltip(owner);
+      });
+      document.addEventListener("focusout", (event) => {
+        if (event.target.closest?.(".hover-detail")) hideFloatingTooltip();
+      });
+      document.addEventListener("scroll", hideFloatingTooltip, true);
+      window.addEventListener("resize", hideFloatingTooltip);
       const app = document.querySelector(".app"),
         navToggle = document.querySelector(".nav-toggle");
       if (localStorage.getItem("certhub-nav-collapsed") === "1")
@@ -513,7 +560,7 @@
                 (id) => names.get(Number(id)) || "#" + id,
               ),
               certNames = selected.join("、"),
-              certText = selected.length === 1 ? selected[0] : selected.length > 1 ? selected.length + " 个" : "未授权",
+              certText = selected.length === 1 ? selected[0] : selected.length > 1 ? selected.length + " 个证书" : "未授权",
               certDisplay = selected.length > 1
                 ? '<span class="hover-detail" tabindex="0" data-tip="' + esc(certNames) + '">' + esc(certText) + "</span>"
                 : esc(certText);
@@ -531,7 +578,7 @@
               destination = r.download_path || "自定义目录";
             else destination = "服务托管证书目录";
             return (
-              '<div class="cell-lines"><span class="ellipsis"><b>证书</b> ' +
+              '<div class="cell-lines"><span><b>证书</b> ' +
               certDisplay +
               '</span><span class="ellipsis muted" title="' +
               esc(destination) +
