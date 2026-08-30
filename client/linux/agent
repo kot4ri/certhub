@@ -8,7 +8,7 @@ POLL_SECONDS=300
 cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
 system_json(){ python3 - <<'PY'
 import json,platform
-i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.10'}
+i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.11'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
@@ -46,7 +46,7 @@ for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
 PY
 )
   if [[ -n ${update_info[0]:-} ]]; then
-    if [[ ${update_info[1]} == 0.3.10 ]]; then
+    if [[ ${update_info[1]} == 0.3.11 ]]; then
       payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
       curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
     else
@@ -92,6 +92,49 @@ PY
     curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_cleanup" >/dev/null
     rm -f "$response";return 0
   fi
+  python3 - "$response" "$STATE/server-config.json" "$STATE/deployment-state.json" "$STATE/certificate-versions.json" "$STATE/certificates" <<'PY'
+import json,os,re,shutil,sys
+response_path,config_path,state_path,versions_path,cert_root=sys.argv[1:6]
+items=(json.load(open(response_path)).get('data') or {}).get('certificates',[])
+config=json.load(open(config_path))
+try: state=json.load(open(state_path))
+except Exception: state={}
+try: versions=json.load(open(versions_path))
+except Exception: versions={}
+managed={str(k):v for k,v in (state.get('managed_by_certificate') or {}).items() if isinstance(v,str)}
+legacy=set(v for v in (state.get('managed_paths') or []) if isinstance(v,str))
+authorized={str(item['id']):item for item in items}
+def expected_path(item):
+ mode=config.get('deploy_mode') or 'files-only'
+ if mode=='custom':
+  base=config.get('download_path') or ''
+  if not base.startswith('/'):return None
+  return os.path.realpath(os.path.join(base,re.sub(r'[^A-Za-z0-9._-]','_',item.get('name') or str(item.get('id')))))
+ if mode=='bt-panel':
+  subject=(item.get('subject_name') or item.get('subject') or item.get('name') or str(item.get('id'))).lower()
+  subject=subject[2:] if subject.startswith('*.') else subject
+  return os.path.realpath('/www/server/panel/vhost/ssl/'+re.sub(r'[^a-z0-9._-]','_',subject))
+ return None
+for cert_id,item in authorized.items():
+ expected=expected_path(item)
+ if expected and (managed.get(cert_id)==expected or expected in legacy):managed[cert_id]=expected
+authorized_paths={expected_path(item) for item in authorized.values()};authorized_paths.discard(None)
+for cert_id in set(str(k) for k in versions)-set(authorized):
+ item=None
+ current=os.path.join(cert_root,cert_id,'current','bundle.json')
+ try:item=(json.load(open(current)).get('data') or {})
+ except Exception:pass
+ expected=expected_path(item) if item else None
+ candidate=managed.get(cert_id) or (expected if expected in legacy else None)
+ if candidate and expected and os.path.realpath(candidate)==expected and expected not in authorized_paths:
+  shutil.rmtree(expected,ignore_errors=True)
+ shutil.rmtree(os.path.join(cert_root,cert_id),ignore_errors=True)
+ versions.pop(cert_id,None);managed.pop(cert_id,None)
+state['managed_by_certificate']=managed
+state['managed_paths']=sorted(set(managed.values()))
+for path,data in ((versions_path,versions),(state_path,state)):
+ tmp=path+'.new';json.dump(data,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,path)
+PY
   now=$(date +%s);last_check=$((now-POLL_SECONDS));[[ -f $STATE/last-schedule-check ]] && read -r last_check < "$STATE/last-schedule-check"
   read -r due command_token < <(python3 - "$STATE/server-config.json" "$last_check" "$now" "$force" <<'PY'
 import datetime,json,sys
@@ -197,9 +240,8 @@ if managed_path:
  state_path=state+'/deployment-state.json'
  try: deployment=json.load(open(state_path))
  except Exception: deployment={}
- paths=deployment.get('managed_paths') or []
- if managed_path not in paths:paths.append(managed_path)
- deployment['managed_paths']=paths;tmp=state_path+'.new';json.dump(deployment,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,state_path)
+ managed=deployment.get('managed_by_certificate') or {};managed[cert_id]=managed_path
+ deployment['managed_by_certificate']=managed;deployment['managed_paths']=sorted(set(managed.values()));tmp=state_path+'.new';json.dump(deployment,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,state_path)
 PY
     python3 - "$STATE/certificate-versions.json" "$cert_id" "$expected_version" <<'PY'
 import json,os,sys

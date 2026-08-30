@@ -22,7 +22,7 @@ curl_with_ipv4_fallback() {
 system_file=$(mktemp "$CONFIG_DIR/.system.XXXXXX")
 python3 - "$system_file" <<'PY'
 import json,os,platform,sys
-info={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.10'}
+info={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.11'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='): info['os_version']=line.split('=',1)[1].strip().strip('"'); break
@@ -65,4 +65,4 @@ else
   exit 1
 fi
 rm -f "$agent_file" "$service_file"
-echo 'CertHub Agent 0.3.10 安装完成。'
+echo 'CertHub Agent 0.3.11 安装完成。'

@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.3.10"
+VERSION = "0.3.11"
 POLL_SECONDS = 300
 PROGRAM_DATA = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "CertHub"
 CONFIG_FILE = PROGRAM_DATA / "config.protected"
@@ -238,13 +238,7 @@ def inherit_user_acl(path: Path) -> None:
     )
 
 
-def deploy_bundle(bundle: dict, server_config: dict, local_config: dict) -> str:
-    validate_pair(bundle["fullchain_pem"], bundle["private_key_pem"])
-    version_root = PROGRAM_DATA / "versions" / str(bundle["certificate_id"]) / bundle["version"]
-    atomic_write(version_root / "fullchain.pem", bundle["fullchain_pem"])
-    atomic_write(version_root / "privkey.pem", bundle["private_key_pem"])
-    restrict_acl(version_root)
-
+def destination_for(name: str, server_config: dict, local_config: dict) -> Path:
     mode = server_config.get("deploy_mode") or "files-only"
     custom_destination = mode == "custom" and bool(server_config.get("download_path"))
     if custom_destination:
@@ -252,9 +246,19 @@ def deploy_bundle(bundle: dict, server_config: dict, local_config: dict) -> str:
         if not destination_root.is_absolute():
             raise ValueError("custom download path must be absolute")
     else:
-        # user-home is selected and dispatched by the server; bt-panel is intentionally unsupported.
         destination_root = Path(local_config["user_home_download_path"])
-    destination = destination_root / safe_name(bundle.get("name", ""))
+    return destination_root / safe_name(name)
+
+
+def deploy_bundle(bundle: dict, server_config: dict, local_config: dict) -> str:
+    validate_pair(bundle["fullchain_pem"], bundle["private_key_pem"])
+    version_root = PROGRAM_DATA / "versions" / str(bundle["certificate_id"]) / bundle["version"]
+    atomic_write(version_root / "fullchain.pem", bundle["fullchain_pem"])
+    atomic_write(version_root / "privkey.pem", bundle["private_key_pem"])
+    restrict_acl(version_root)
+
+    custom_destination = (server_config.get("deploy_mode") or "files-only") == "custom" and bool(server_config.get("download_path"))
+    destination = destination_for(bundle.get("name", ""), server_config, local_config)
     atomic_write(destination / "fullchain.pem", bundle["fullchain_pem"])
     atomic_write(destination / "privkey.pem", bundle["private_key_pem"])
     if custom_destination:
@@ -355,7 +359,7 @@ def sync_once(force: bool = False) -> None:
     cleanup = server_config.get("cleanup") or {}
     if cleanup.get("command_token"):
         clear_managed_certificates(state, True)
-        STATE_FILE.write_text(json.dumps({"last_sync": int(time.time()), "last_schedule_check": int(time.time()), "task_interval_seconds": POLL_SECONDS, "certificate_versions": {}, "managed_destinations": []}), encoding="utf-8")
+        STATE_FILE.write_text(json.dumps({"last_sync": int(time.time()), "last_schedule_check": int(time.time()), "task_interval_seconds": POLL_SECONDS, "certificate_versions": {}, "managed_destinations": [], "managed_by_certificate": {}, "certificate_names": {}}), encoding="utf-8")
         request(config["api_endpoint"], "ack_cleanup", {"command_token": cleanup["command_token"], "system": system_info()}, config)
         return
     versions = {str(k): str(v) for k, v in (state.get("certificate_versions") or {}).items()}
@@ -363,29 +367,47 @@ def sync_once(force: bool = False) -> None:
     deployment_changed = state.get("deployment_signature") != signature
     if deployment_changed:
         clear_managed_certificates(state, False)
-        versions = {}
-    managed_destinations = [] if deployment_changed else list(state.get("managed_destinations") or [])
+    assignments = pulled.get("certificates") or []
+    authorized = {str(item["id"]): item for item in assignments}
+    legacy_destinations = set() if deployment_changed else set(state.get("managed_destinations") or [])
+    managed_by_certificate = {} if deployment_changed else {str(k): str(v) for k, v in (state.get("managed_by_certificate") or {}).items()}
+    certificate_names = {} if deployment_changed else {str(k): str(v) for k, v in (state.get("certificate_names") or {}).items()}
+    for certificate_id, assignment in authorized.items():
+        certificate_names[certificate_id] = str(assignment.get("name") or certificate_id)
+        expected = str(destination_for(certificate_names[certificate_id], server_config, config).resolve())
+        if expected in legacy_destinations or Path(expected).is_dir():
+            managed_by_certificate[certificate_id] = expected
+    authorized_paths = {str(destination_for(str(item.get("name") or certificate_id), server_config, config).resolve()) for certificate_id, item in authorized.items()}
+    for certificate_id in set(versions) - set(authorized):
+        expected = str(destination_for(certificate_names[certificate_id], server_config, config).resolve()) if certificate_id in certificate_names else ""
+        recorded = str(Path(managed_by_certificate[certificate_id]).resolve()) if certificate_id in managed_by_certificate else ""
+        if expected and recorded == expected and recorded not in authorized_paths:
+            shutil.rmtree(recorded, ignore_errors=True)
+        shutil.rmtree(PROGRAM_DATA / "versions" / certificate_id, ignore_errors=True)
+        versions.pop(certificate_id, None)
+        managed_by_certificate.pop(certificate_id, None)
+        certificate_names.pop(certificate_id, None)
     now = int(time.time())
     schedule = server_config.get("sync_schedule") or "0 * * * *"
     command_token = server_config.get("force_sync_token")
     forced = force or bool(command_token) or deployment_changed
     certificate_due = forced or cron_due(schedule, int(state.get("last_schedule_check") or now - POLL_SECONDS), now)
     if certificate_due:
-        for assignment in pulled.get("certificates") or []:
+        for assignment in assignments:
             certificate_id = str(assignment["id"])
             if not forced and versions.get(certificate_id) == assignment.get("version"):
                 continue
             bundle = request(config["api_endpoint"], "bundle", {"certificate_id": assignment["id"], "system": system_info()}, config)
             destination = deploy_bundle(bundle, server_config, config)
-            if destination not in managed_destinations:
-                managed_destinations.append(destination)
+            managed_by_certificate[certificate_id] = destination
+            certificate_names[certificate_id] = str(bundle.get("name") or certificate_id)
             versions[certificate_id] = bundle["version"]
         if command_token:
             request(config["api_endpoint"], "ack_sync", {"command_token": command_token, "system": system_info()}, config)
     PROGRAM_DATA.mkdir(parents=True, exist_ok=True)
     if state.get("task_interval_seconds") != POLL_SECONDS:
         configure_task(POLL_SECONDS)
-    STATE_FILE.write_text(json.dumps({"last_sync": now if certificate_due else int(state.get("last_sync") or 0), "last_schedule_check": now, "task_interval_seconds": POLL_SECONDS, "sync_schedule": schedule, "config_version": server_config.get("config_updated_at"), "deployment_signature": signature, "certificate_versions": versions, "managed_destinations": managed_destinations}), encoding="utf-8")
+    STATE_FILE.write_text(json.dumps({"last_sync": now if certificate_due else int(state.get("last_sync") or 0), "last_schedule_check": now, "task_interval_seconds": POLL_SECONDS, "sync_schedule": schedule, "config_version": server_config.get("config_updated_at"), "deployment_signature": signature, "certificate_versions": versions, "managed_destinations": sorted(set(managed_by_certificate.values())), "managed_by_certificate": managed_by_certificate, "certificate_names": certificate_names}), encoding="utf-8")
 
 
 def daemon() -> None:
