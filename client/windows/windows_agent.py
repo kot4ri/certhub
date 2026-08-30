@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.3.11"
+VERSION = "0.3.12"
 POLL_SECONDS = 300
 PROGRAM_DATA = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "CertHub"
 CONFIG_FILE = PROGRAM_DATA / "config.protected"
@@ -265,6 +265,7 @@ def deploy_bundle(bundle: dict, server_config: dict, local_config: dict) -> str:
         restrict_acl(destination)
     else:
         inherit_user_acl(destination)
+    (destination / ".certhub-managed").write_text(str(bundle["certificate_id"]), encoding="ascii")
     return str(destination)
 
 
@@ -279,12 +280,25 @@ def deployment_signature(server_config: dict) -> str:
     return json.dumps({"mode": server_config.get("deploy_mode") or "user-home", "path": server_config.get("download_path") or ""}, sort_keys=True, separators=(",", ":"))
 
 
+def clear_managed_destination(value: str) -> None:
+    path = Path(value).resolve()
+    if path.parent == path or len(path.parts) < 3:
+        return
+    for name in ("fullchain.pem", "privkey.pem", ".certhub-managed"):
+        try:
+            (path / name).unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
 def clear_managed_certificates(state: dict, include_versions: bool = True) -> None:
     for value in state.get("managed_destinations") or []:
         try:
-            path = Path(value).resolve()
-            if path.parent != path and len(path.parts) >= 3:
-                shutil.rmtree(path, ignore_errors=True)
+            clear_managed_destination(value)
         except Exception:
             logging.exception("failed to remove managed certificate destination")
     if include_versions:
@@ -382,7 +396,7 @@ def sync_once(force: bool = False) -> None:
         expected = str(destination_for(certificate_names[certificate_id], server_config, config).resolve()) if certificate_id in certificate_names else ""
         recorded = str(Path(managed_by_certificate[certificate_id]).resolve()) if certificate_id in managed_by_certificate else ""
         if expected and recorded == expected and recorded not in authorized_paths:
-            shutil.rmtree(recorded, ignore_errors=True)
+            clear_managed_destination(recorded)
         shutil.rmtree(PROGRAM_DATA / "versions" / certificate_id, ignore_errors=True)
         versions.pop(certificate_id, None)
         managed_by_certificate.pop(certificate_id, None)

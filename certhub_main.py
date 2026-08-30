@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 import zipfile
 
 PANEL_DIR = '/www/server/panel'
@@ -39,6 +40,21 @@ class certhub_main(object):
     def value(get, name, default=None):
         value = getattr(get, name, default)
         return default if value is None else value
+
+    @staticmethod
+    def validate_panel_url(value):
+        url = str(value or '').strip().rstrip('/')
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            valid = (parsed.scheme == 'https' and bool(parsed.hostname) and not parsed.username and
+                     not parsed.password and not parsed.query and not parsed.fragment)
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                valid = False
+        except (TypeError, ValueError):
+            valid = False
+        if not valid or len(url) > 512 or any(char in url for char in "'\"\\\r\n\t"):
+            raise CertHubError('宝塔面板公开地址必须是安全的 HTTPS 地址')
+        return url
 
     def guard(self, callback):
         try:
@@ -171,9 +187,7 @@ class certhub_main(object):
             if not isinstance(ids, list):
                 raise CertHubError('证书权限参数无效')
             if not setting('panel_base_url').strip():
-                panel_url = str(self.value(get, 'panel_base_url', '') or '').strip().rstrip('/')
-                if not panel_url.startswith('https://') or len(panel_url) > 512:
-                    raise CertHubError('请先设置有效的 HTTPS 服务端公开地址')
+                panel_url = self.validate_panel_url(self.value(get, 'panel_base_url', ''))
                 save_setting('panel_base_url', panel_url)
             options = {key: self.value(get, key, '') for key in ('allowed_ip', 'deploy_mode', 'download_path', 'auto_deploy_sites', 'sync_schedule')}
             if not str(options.get('sync_schedule') or '').strip():
@@ -298,9 +312,7 @@ class certhub_main(object):
 
     def save_settings(self, get):
         def run():
-            url = self.value(get, 'panel_base_url', '').strip().rstrip('/')
-            if not url.startswith('https://') or len(url) > 512:
-                raise CertHubError('宝塔面板公开地址必须使用 HTTPS')
+            url = self.validate_panel_url(self.value(get, 'panel_base_url', ''))
             try:
                 retention = int(self.value(get, 'pull_retention_days', '30'))
             except (TypeError, ValueError):
@@ -389,7 +401,8 @@ class certhub_main(object):
             'published_at': str(payload.get('published_at') or ''),
             'zip_name': expected_zip,
             'zip_url': assets.get(expected_zip, ''),
-            'checksum_url': assets.get(expected_zip + '.sha256', '')
+            'checksum_url': assets.get(expected_zip + '.sha256', ''),
+            'signature_url': assets.get(expected_zip + '.sig', '')
         }
 
     def check_update(self, get):
@@ -397,8 +410,17 @@ class certhub_main(object):
 
     @staticmethod
     def _download(url, target, limit):
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != 'https' or not parsed.hostname or not (
+                parsed.hostname in ('github.com', 'api.github.com') or
+                parsed.hostname.endswith('.githubusercontent.com')):
+            raise CertHubError('更新下载地址不受信任')
         request = urllib.request.Request(url, headers={'User-Agent': 'CertHub-Panel-Updater'})
         with urllib.request.urlopen(request, timeout=45) as response, open(target, 'wb') as output:
+            final = urllib.parse.urlsplit(response.geturl())
+            if final.scheme != 'https' or not final.hostname or not (
+                    final.hostname == 'github.com' or final.hostname.endswith('.githubusercontent.com')):
+                raise CertHubError('更新下载重定向地址不受信任')
             total = 0
             while True:
                 block = response.read(1024 * 1024)
@@ -414,15 +436,17 @@ class certhub_main(object):
             release = self._release_info()
             if not release['update_available']:
                 return self.ok(release, '当前已是最新版本')
-            if not release['zip_url'] or not release['checksum_url']:
-                raise CertHubError('Release 缺少插件包或校验文件')
+            if not release['zip_url'] or not release['checksum_url'] or not release['signature_url']:
+                raise CertHubError('Release 缺少插件包、校验文件或数字签名')
             os.makedirs(self.UPDATE_ROOT, mode=0o700, exist_ok=True)
             stage = tempfile.mkdtemp(prefix='certhub-', dir=self.UPDATE_ROOT)
             archive = os.path.join(stage, 'package.zip')
             checksum_file = os.path.join(stage, 'package.sha256')
+            signature_file = os.path.join(stage, 'package.sig')
             try:
                 self._download(release['zip_url'], archive, 100 * 1024 * 1024)
                 self._download(release['checksum_url'], checksum_file, 4096)
+                self._download(release['signature_url'], signature_file, 16384)
                 expected = open(checksum_file, 'r', encoding='utf-8').read().strip().split()[0].lower()
                 if not re.match(r'^[0-9a-f]{64}$', expected):
                     raise CertHubError('Release 校验文件格式无效')
@@ -432,6 +456,13 @@ class certhub_main(object):
                         digest.update(block)
                 if digest.hexdigest() != expected:
                     raise CertHubError('更新包 SHA-256 校验失败')
+                public_key = os.path.join(PLUGIN_DIR, 'assets', 'release-public-key.pem')
+                verified = subprocess.run(
+                    ['openssl', 'dgst', '-sha256', '-verify', public_key, '-signature', signature_file, archive],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False
+                )
+                if verified.returncode != 0:
+                    raise CertHubError('更新包数字签名验证失败')
                 extract_dir = os.path.join(stage, 'extracted')
                 os.makedirs(extract_dir, mode=0o700)
                 with zipfile.ZipFile(archive) as package:

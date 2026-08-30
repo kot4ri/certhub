@@ -8,7 +8,7 @@ POLL_SECONDS=300
 cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
 system_json(){ python3 - <<'PY'
 import json,platform
-i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.13'}
+i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.14'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
@@ -46,7 +46,7 @@ for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
 PY
 )
   if [[ -n ${update_info[0]:-} ]]; then
-    if [[ ${update_info[1]} == 0.3.13 ]]; then
+    if [[ ${update_info[1]} == 0.3.14 ]]; then
       payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
       curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
     else
@@ -75,7 +75,12 @@ def clear(paths):
  for value in paths:
   try:
    path=os.path.realpath(value)
-   if path.startswith('/') and len([x for x in path.split('/') if x])>=2:shutil.rmtree(path,ignore_errors=True)
+   if path.startswith('/') and len([x for x in path.split('/') if x])>=2:
+    for name in ('fullchain.pem','privkey.pem','info.json','.certhub-managed'):
+     try:os.unlink(os.path.join(path,name))
+     except FileNotFoundError:pass
+    try:os.rmdir(path)
+    except OSError:pass
   except Exception:pass
 cleanup=(config.get('cleanup') or {}).get('command_token') or ''
 signature=json.dumps({'mode':config.get('deploy_mode') or 'files-only','path':config.get('download_path') or ''},sort_keys=True,separators=(',',':'))
@@ -104,6 +109,14 @@ except Exception: versions={}
 managed={str(k):v for k,v in (state.get('managed_by_certificate') or {}).items() if isinstance(v,str)}
 legacy=set(v for v in (state.get('managed_paths') or []) if isinstance(v,str))
 authorized={str(item['id']):item for item in items}
+def clear_destination(path):
+ path=os.path.realpath(path)
+ if not path.startswith('/') or len([x for x in path.split('/') if x])<2:return
+ for name in ('fullchain.pem','privkey.pem','info.json','.certhub-managed'):
+  try:os.unlink(os.path.join(path,name))
+  except FileNotFoundError:pass
+ try:os.rmdir(path)
+ except OSError:pass
 def expected_path(item):
  mode=config.get('deploy_mode') or 'files-only'
  if mode=='custom':
@@ -127,7 +140,7 @@ for cert_id in set(str(k) for k in versions)-set(authorized):
  expected=expected_path(item) if item else None
  candidate=managed.get(cert_id) or (expected if expected in legacy else None)
  if candidate and expected and os.path.realpath(candidate)==expected and expected not in authorized_paths:
-  shutil.rmtree(expected,ignore_errors=True)
+  clear_destination(expected)
  shutil.rmtree(os.path.join(cert_root,cert_id),ignore_errors=True)
  versions.pop(cert_id,None);managed.pop(cert_id,None)
 state['managed_by_certificate']=managed
@@ -238,6 +251,7 @@ elif deploy_mode=='bt-panel':
    if os.path.isfile('/www/server/nginx/sbin/nginx'):subprocess.run(['/www/server/nginx/sbin/nginx','-s','reload'],check=True)
    elif shutil.which('systemctl') and shutil.which('apachectl'):subprocess.run(['systemctl','reload','httpd'],check=True)
 if managed_path:
+ marker=os.path.join(managed_path,'.certhub-managed');open(marker,'w').write(cert_id+'\n');os.chmod(marker,0o600)
  state_path=state+'/deployment-state.json'
  try: deployment=json.load(open(state_path))
  except Exception: deployment={}

@@ -26,11 +26,29 @@ DB_PATH = os.path.join(DATA_DIR, 'certhub.db')
 ALLOWED_ROOTS = ('/www/server/panel/vhost/ssl',)
 MAX_CERT_BYTES = 1024 * 1024
 MAX_KEY_BYTES = 128 * 1024
+MAX_PULL_EVENTS = 100000
 _db_lock = threading.RLock()
+_rate_lock = threading.Lock()
+_rate_buckets = {}
 
 
 class CertHubError(Exception):
     pass
+
+
+def enforce_rate_limit(key, limit, window_seconds):
+    now = time.time()
+    cutoff = now - window_seconds
+    with _rate_lock:
+        events = [stamp for stamp in _rate_buckets.get(key, ()) if stamp > cutoff]
+        if len(events) >= limit:
+            raise CertHubError('请求过于频繁，请稍后重试')
+        events.append(now)
+        _rate_buckets[key] = events
+        if len(_rate_buckets) > 4096:
+            for bucket_key in list(_rate_buckets):
+                if not _rate_buckets[bucket_key] or _rate_buckets[bucket_key][-1] <= cutoff:
+                    _rate_buckets.pop(bucket_key, None)
 
 
 def utcnow():
@@ -472,8 +490,22 @@ class ClientService(object):
         if deploy_mode == 'custom':
             normalized = (download_path or '').replace('\\', '/')
             absolute = ntpath.isabs(download_path or '') if client_platform == 'windows' else bool(download_path and download_path.startswith('/'))
-            if not absolute or '..' in normalized.split('/'):
+            if (not absolute or '..' in normalized.split('/') or
+                    any(ord(char) < 32 for char in (download_path or ''))):
                 raise CertHubError('自定义下载目录必须是安全的绝对路径')
+            if client_platform == 'windows':
+                safe_path = ntpath.normcase(ntpath.normpath(download_path))
+                drive, tail = ntpath.splitdrive(safe_path)
+                blocked = {ntpath.normcase(drive + '\\' + name) for name in
+                           ('windows', 'program files', 'program files (x86)', 'programdata', 'users')}
+                if not drive or tail in ('', '\\', '/') or safe_path in blocked:
+                    raise CertHubError('自定义下载目录不能使用 Windows 系统根目录')
+            else:
+                safe_path = os.path.normpath(download_path)
+                blocked = {'/', '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64', '/proc',
+                           '/root', '/run', '/sbin', '/sys', '/usr', '/var'}
+                if safe_path in blocked:
+                    raise CertHubError('自定义下载目录不能使用 Linux 系统根目录')
         schedule = str(options.get('sync_schedule') or '0 * * * *').strip()
         validate_cron(schedule)
         return {'allowed_ip': allowed_ip or None, 'deploy_mode': deploy_mode, 'download_path': download_path,
@@ -501,17 +533,18 @@ class ClientService(object):
     def installation(client_id, client_uuid, client_platform, enrollment, panel_url):
         endpoint = panel_url + '/certhub-api'
         if client_platform == 'windows':
-            install_url = '%s?action=install_windows_exe&token=%s' % (endpoint, enrollment)
+            install_url = '%s?action=install_windows_exe' % endpoint
             encoded = base64.urlsafe_b64encode(endpoint.encode('utf-8')).decode('ascii').rstrip('=')
             filename = 'certhub-setup..%s..%s.exe' % (encoded, enrollment)
-            command = "$u='%s';$p=Join-Path $env:TEMP '%s';try{Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $p}catch{& curl.exe -4 -fSL $u -o $p;if($LASTEXITCODE -ne 0){throw}};Start-Process -FilePath $p -Verb RunAs" % (install_url.replace("'", "''"), filename)
+            command = "$u='%s';$t='%s';$p=Join-Path $env:TEMP '%s';try{Invoke-WebRequest -UseBasicParsing -Method Post -Uri $u -Body @{token=$t} -OutFile $p}catch{& curl.exe -4 -fSL -X POST --data-urlencode \"token=$t\" $u -o $p;if($LASTEXITCODE -ne 0){throw}};Start-Process -FilePath $p -Verb RunAs" % (install_url.replace("'", "''"), enrollment, filename)
         else:
             install_url = None
-            url = "%s?action=install_linux&token=%s" % (endpoint, enrollment)
-            command = "{ curl -fsS '%s' -o /tmp/certhub-install.sh || curl -4 -fsS '%s' -o /tmp/certhub-install.sh; } && sudo bash /tmp/certhub-install.sh" % (url, url)
+            url = "%s?action=install_linux" % endpoint
+            command = "{ curl -fsS -X POST --data-urlencode 'token=%s' '%s' -o /tmp/certhub-install.sh || curl -4 -fsS -X POST --data-urlencode 'token=%s' '%s' -o /tmp/certhub-install.sh; } && sudo bash /tmp/certhub-install.sh" % (enrollment, url, enrollment, url)
         return {'id': client_id, 'client_uuid': client_uuid, 'platform': client_platform, 'enrollment_token': enrollment, 'expires_at': int(time.time()) + 1800, 'install_command': command, 'install_url': install_url}
 
     def enroll(self, enrollment, ip, system_info):
+        enforce_rate_limit('enroll:%s' % ip, 20, 300)
         if len(enrollment or '') < 32:
             raise CertHubError('注册凭据无效')
         now = utcnow()
@@ -534,6 +567,7 @@ class ClientService(object):
                 db.close()
 
     def authenticate(self, client_uuid, auth_token, ip, system_info=None, action='pull', certificate_id=None):
+        enforce_rate_limit('auth-ip:%s' % ip, 300, 300)
         try:
             retention_days = max(1, min(3650, int(setting('pull_retention_days', '30') or 30)))
         except (TypeError, ValueError):
@@ -544,10 +578,16 @@ class ClientService(object):
             if not row or not auth_token or not secrets.compare_digest(row['auth_token_hash'] or '', token_hash(auth_token)):
                 raise CertHubError('客户端认证失败')
             self.assert_ip(row['allowed_ip'], ip)
+            enforce_rate_limit('client:%s' % row['client_uuid'], 180, 300)
+            if row['revoke_after_cleanup'] and action not in ('pull', 'ack_cleanup'):
+                raise CertHubError('客户端正在撤销，仅允许执行清理')
             info = system_info or {}
             now = utcnow()
             db.execute('UPDATE clients SET hostname=?,os_name=?,os_version=?,architecture=?,agent_version=?,last_ip=?,last_seen_at=? WHERE id=?', (self.field(info, 'hostname', row['hostname']), self.field(info, 'os_name', row['os_name']), self.field(info, 'os_version', row['os_version']), self.field(info, 'architecture', row['architecture']), self.field(info, 'agent_version', row['agent_version']), ip, now, row['id']))
-            db.execute('INSERT INTO pull_events(client_id,certificate_id,action,ip_address,hostname,os_name,os_version,architecture,agent_version,success,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (row['id'], certificate_id, action, ip, self.field(info, 'hostname'), self.field(info, 'os_name'), self.field(info, 'os_version'), self.field(info, 'architecture'), self.field(info, 'agent_version'), 1, now))
+            if action in ('pull', 'bundle'):
+                cursor = db.execute('INSERT INTO pull_events(client_id,certificate_id,action,ip_address,hostname,os_name,os_version,architecture,agent_version,success,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (row['id'], certificate_id, action, ip, self.field(info, 'hostname'), self.field(info, 'os_name'), self.field(info, 'os_version'), self.field(info, 'architecture'), self.field(info, 'agent_version'), 1, now))
+                if cursor.lastrowid and cursor.lastrowid % 100 == 0:
+                    db.execute('DELETE FROM pull_events WHERE id <= COALESCE((SELECT id FROM pull_events ORDER BY id DESC LIMIT 1 OFFSET ?), 0)', (MAX_PULL_EVENTS,))
             db.execute('DELETE FROM pull_events WHERE created_at<?', (retention_cutoff,))
             return dict(row)
 
@@ -575,9 +615,9 @@ class ClientService(object):
             row = db.execute('''SELECT platform,deploy_mode,download_path,auto_deploy_sites,sync_schedule,config_updated_at,force_sync_token,update_token,cleanup_token FROM clients WHERE id=?''', (client_id,)).fetchone()
         if not row:
             return {}
-        result = dict(row)
         if row['cleanup_token']:
-            result['cleanup'] = {'command_token': row['cleanup_token']}
+            return {'cleanup': {'command_token': row['cleanup_token']}}
+        result = dict(row)
         if row['update_token']:
             info_path = os.path.join(PLUGIN_DIR, 'info.json')
             with open(info_path, 'r', encoding='utf-8') as handle:

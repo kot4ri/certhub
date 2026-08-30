@@ -146,6 +146,8 @@
           "</span>"
         );
       }
+      const csrfToken =
+        document.querySelector('meta[name="certhub-csrf-token"]')?.content || "";
       const api = (method, data = {}) =>
         fetch(
           "/certhub-api?action=admin_call&method=" + encodeURIComponent(method),
@@ -154,6 +156,7 @@
             credentials: "same-origin",
             headers: {
               "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+              "X-CertHub-CSRF": csrfToken,
             },
             body: new URLSearchParams(data),
           },

@@ -4,7 +4,9 @@ from __future__ import absolute_import
 import base64
 import json
 import os
+import secrets
 import sys
+import urllib.parse
 
 PLUGIN_DIR = '/www/server/panel/plugin/certhub'
 
@@ -32,6 +34,7 @@ def handle_request():
         resp = Response(body, status=status, content_type=content_type)
         resp.headers['Cache-Control'] = 'no-store'
         resp.headers['X-Content-Type-Options'] = 'nosniff'
+        resp.headers['Referrer-Policy'] = 'no-referrer'
         for key, value in (headers or {}).items():
             resp.headers[key] = value
         return resp
@@ -41,7 +44,7 @@ def handle_request():
         service = ClientService()
         ip = public.GetClientIp()
         if request.method == 'GET' and action == 'health':
-            return response({'status': True, 'data': {'service': 'CertHub', 'version': '1.0.0'}})
+            return response({'status': True, 'data': {'service': 'CertHub', 'version': '1.1.0'}})
         if request.method == 'GET' and action == 'author_avatar':
             path = os.path.join(PLUGIN_DIR, 'assets', 'kot4ri.jpg')
             with open(path, 'rb') as handle:
@@ -63,10 +66,19 @@ def handle_request():
                 return response('登录已失效，请重新登录宝塔面板。', 401, 'text/plain; charset=utf-8')
             path = os.path.join(PLUGIN_DIR, 'admin.html')
             with open(path, 'r', encoding='utf-8') as handle:
-                return response(handle.read(), 200, 'text/html; charset=utf-8')
+                csrf_token = session.get('certhub_csrf_token') or secrets.token_urlsafe(32)
+                session['certhub_csrf_token'] = csrf_token
+                return response(handle.read().replace('@@CSRF_TOKEN@@', csrf_token), 200, 'text/html; charset=utf-8')
         if request.method == 'POST' and action == 'admin_call':
             if not session.get('login', False):
                 return response({'status': False, 'msg': '登录已失效'}, 401)
+            origin = request.headers.get('Origin', '')
+            if origin and urllib.parse.urlsplit(origin).netloc != request.host:
+                return response({'status': False, 'msg': '请求来源无效'}, 403)
+            expected_csrf = str(session.get('certhub_csrf_token') or '')
+            supplied_csrf = str(request.headers.get('X-CertHub-CSRF') or '')
+            if not expected_csrf or not supplied_csrf or not secrets.compare_digest(expected_csrf, supplied_csrf):
+                return response({'status': False, 'msg': '安全令牌无效，请刷新页面'}, 403)
             method = request.args.get('method', '')
             allowed = {
                 'dashboard', 'discover_local', 'complete_onboarding', 'skip_onboarding', 'import_local', 'sync_now', 'certificates',
@@ -81,8 +93,8 @@ def handle_request():
             params = dict(request.form.items())
             result = getattr(certhub_main(), method)(SimpleNamespace(**params))
             return response(result)
-        if request.method == 'GET' and action in ('install_linux', 'install_windows'):
-            token = request.args.get('token', '')
+        if request.method in ('GET', 'POST') and action in ('install_linux', 'install_windows'):
+            token = request.values.get('token', '')
             if len(token) < 32 or not all(ch.isalnum() or ch in '_-' for ch in token):
                 raise CertHubError('安装凭据无效')
             platform_name = 'linux' if action == 'install_linux' else 'windows'
@@ -94,8 +106,8 @@ def handle_request():
             script = script.replace('@@API_ENDPOINT@@', endpoint).replace('@@ENROLLMENT_TOKEN@@', token)
             content_type = 'text/x-shellscript' if platform_name == 'linux' else 'application/x-bat'
             return response(script, 200, content_type, {'Content-Disposition': 'attachment; filename="certhub-install.%s"' % ('sh' if platform_name == 'linux' else 'bat')})
-        if request.method == 'GET' and action == 'install_windows_exe':
-            token = request.args.get('token', '')
+        if request.method in ('GET', 'POST') and action == 'install_windows_exe':
+            token = request.values.get('token', '')
             if len(token) < 32 or not all(ch.isalnum() or ch in '_-' for ch in token):
                 raise CertHubError('安装凭据无效')
             path = os.path.join(PLUGIN_DIR, 'client', 'windows', 'certhub-agent.exe')
@@ -123,13 +135,16 @@ def handle_request():
             path = os.path.join(PLUGIN_DIR, 'client', *relative.split('/'))
             with open(path, 'r', encoding='utf-8') as handle:
                 return response(handle.read(), 200, content_type)
+        if request.content_length and request.content_length > 2 * 1024 * 1024:
+            return response({'status': False, 'error': 'request_too_large'}, 413)
         data = request.get_json(silent=True) or {}
         if request.method == 'POST' and action == 'enroll':
             result = service.enroll(str(data.get('token', '')), ip, data.get('system') or {})
             return response({'status': True, 'data': result})
         client = service.authenticate(request.headers.get('X-CertHub-Client', ''), extract_bearer(request.headers), ip, data.get('system') or {}, action=action, certificate_id=int(data.get('certificate_id') or 0) or None)
         if request.method == 'POST' and action == 'pull':
-            return response({'status': True, 'data': {'config': service.pull_config(client['id']), 'certificates': service.assignments(client['id'])}})
+            assignments = [] if client.get('revoke_after_cleanup') else service.assignments(client['id'])
+            return response({'status': True, 'data': {'config': service.pull_config(client['id']), 'certificates': assignments}})
         if request.method == 'POST' and action == 'bundle':
             return response({'status': True, 'data': service.bundle(client['id'], int(data.get('certificate_id') or 0))})
         if request.method == 'POST' and action == 'ack_sync':
@@ -144,7 +159,7 @@ def handle_request():
         return response({'status': False, 'error': 'not_found'}, 404)
     except CertHubError as exc:
         message = str(exc)
-        status = 401 if '认证' in message else (403 if '权限' in message else 400)
+        status = 429 if '频繁' in message else (401 if '认证' in message else (403 if '权限' in message or '撤销' in message else 400))
         return response({'status': False, 'error': message}, status)
     except Exception:
         return response({'status': False, 'error': 'internal_error'}, 500)
