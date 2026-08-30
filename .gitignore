@@ -12,6 +12,7 @@ __pycache__/
 
 release/*.zip
 release/*.zip.sha256
+release/*.zip.sig
 
 .DS_Store
 Thumbs.db

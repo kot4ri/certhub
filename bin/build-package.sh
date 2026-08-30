@@ -15,4 +15,9 @@ cd "$PROJECT_DIR/.."
 zip -qr -FS "$OUTPUT" certhub \
     -x 'certhub/.git/*' 'certhub/__pycache__/*' 'certhub/**/__pycache__/*' 'certhub/release/*' 'certhub/*.db*' 'certhub/*.key' 'certhub/*.token'
 sha256sum "$OUTPUT" > "$OUTPUT.sha256"
+if [[ -n "${CERTHUB_SIGNING_KEY:-}" ]]; then
+    [[ -f "$CERTHUB_SIGNING_KEY" ]] || { echo '发布签名私钥不存在。' >&2; exit 1; }
+    openssl dgst -sha256 -sign "$CERTHUB_SIGNING_KEY" -out "$OUTPUT.sig" "$OUTPUT"
+    openssl dgst -sha256 -verify "$PROJECT_DIR/assets/release-public-key.pem" -signature "$OUTPUT.sig" "$OUTPUT" >/dev/null
+fi
 echo "$OUTPUT"
