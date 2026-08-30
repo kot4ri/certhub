@@ -1274,7 +1274,7 @@
             document
               .querySelectorAll(".nav button")
               .forEach((b) => (b.disabled = false));
-            dashboard();
+            openPage("dashboard");
           },
           showCertificates = () => {
             progress.textContent =
@@ -1388,7 +1388,8 @@
         try {
           const d = await api("dashboard");
           if (d.onboarding_completed) {
-            dashboard();
+            const requested = location.hash.replace(/^#/, "");
+            openPage(pages[requested] ? requested : "dashboard", false);
             return;
           }
           onboarding();
@@ -1403,15 +1404,23 @@
         events,
         settings,
       };
+      function openPage(name, updateHash = true) {
+        const target = pages[name] ? name : "dashboard",
+          button = document.querySelector(
+            '.nav button[data-page="' + target + '"]',
+          );
+        if (onboardingLocked || !button) return;
+        document
+          .querySelectorAll(".nav button[data-page]")
+          .forEach((item) => item.classList.toggle("active", item === button));
+        if (updateHash)
+          history.replaceState(null, "", location.pathname + location.search + "#" + target);
+        pages[target]();
+      }
       document.querySelectorAll(".nav button[data-page]").forEach(
         (b) =>
           (b.onclick = () => {
-            if (onboardingLocked) return;
-            document
-              .querySelectorAll(".nav button")
-              .forEach((x) => x.classList.remove("active"));
-            b.classList.add("active");
-            pages[b.dataset.page]();
+            openPage(b.dataset.page);
           }),
       );
       startup();
