@@ -1,0 +1,17 @@
+[Unit]
+Description=CertHub certificate synchronization
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/certhub-agent daemon
+Restart=always
+RestartSec=10s
+User=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
