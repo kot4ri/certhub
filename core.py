@@ -4,6 +4,7 @@ from __future__ import absolute_import
 import base64
 import datetime
 import hashlib
+import hmac
 import ipaddress
 import json
 import ntpath
@@ -23,13 +24,12 @@ import uuid
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get('CERTHUB_DATA_DIR', '/www/server/certhub')
 DB_PATH = os.path.join(DATA_DIR, 'certhub.db')
+ROTATION_KEY_PATH = os.path.join(DATA_DIR, 'auth-rotation.key')
 ALLOWED_ROOTS = ('/www/server/panel/vhost/ssl',)
 MAX_CERT_BYTES = 1024 * 1024
 MAX_KEY_BYTES = 128 * 1024
 MAX_PULL_EVENTS = 100000
 _db_lock = threading.RLock()
-_rate_lock = threading.Lock()
-_rate_buckets = {}
 
 
 class CertHubError(Exception):
@@ -37,18 +37,19 @@ class CertHubError(Exception):
 
 
 def enforce_rate_limit(key, limit, window_seconds):
-    now = time.time()
-    cutoff = now - window_seconds
-    with _rate_lock:
-        events = [stamp for stamp in _rate_buckets.get(key, ()) if stamp > cutoff]
-        if len(events) >= limit:
+    now = int(time.time())
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT window_started_at,request_count FROM rate_limits WHERE rate_key=?', (key,)).fetchone()
+        if not row or row['window_started_at'] <= now - window_seconds:
+            db.execute('INSERT INTO rate_limits(rate_key,window_started_at,request_count) VALUES(?,?,1) '
+                       'ON CONFLICT(rate_key) DO UPDATE SET window_started_at=excluded.window_started_at,request_count=1', (key, now))
+        elif row['request_count'] >= limit:
             raise CertHubError('请求过于频繁，请稍后重试')
-        events.append(now)
-        _rate_buckets[key] = events
-        if len(_rate_buckets) > 4096:
-            for bucket_key in list(_rate_buckets):
-                if not _rate_buckets[bucket_key] or _rate_buckets[bucket_key][-1] <= cutoff:
-                    _rate_buckets.pop(bucket_key, None)
+        else:
+            db.execute('UPDATE rate_limits SET request_count=request_count+1 WHERE rate_key=?', (key,))
+        if now % 300 == 0:
+            db.execute('DELETE FROM rate_limits WHERE window_started_at<?', (now - 3600,))
 
 
 def utcnow():
@@ -61,6 +62,47 @@ def token_urlsafe(size=32):
 
 def token_hash(value):
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def version_at_least(value, minimum):
+    def parts(item):
+        match = re.match(r'^(\d+)\.(\d+)\.(\d+)$', str(item or '').strip())
+        return tuple(int(x) for x in match.groups()) if match else (0, 0, 0)
+    return parts(value) >= parts(minimum)
+
+
+def rotation_key():
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    try:
+        with open(ROTATION_KEY_PATH, 'rb') as handle:
+            key = handle.read(64)
+        if len(key) == 32:
+            return key
+    except OSError:
+        pass
+    key = os.urandom(32)
+    temporary = ROTATION_KEY_PATH + '.new'
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, key)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, ROTATION_KEY_PATH)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        with open(ROTATION_KEY_PATH, 'rb') as handle:
+            key = handle.read(64)
+    os.chmod(ROTATION_KEY_PATH, 0o600)
+    return key
+
+
+def derived_auth_token(client_uuid, generation):
+    digest = hmac.new(rotation_key(), ('%s:%s' % (client_uuid, generation)).encode('utf-8'), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
 
 
 def connect():
@@ -173,6 +215,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   metadata_json TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rate_limits (
+  rate_key TEXT PRIMARY KEY,
+  window_started_at INTEGER NOT NULL,
+  request_count INTEGER NOT NULL
+);
 '''
 
 
@@ -201,7 +248,11 @@ def initialize():
                 'cleanup_token': 'ALTER TABLE clients ADD COLUMN cleanup_token TEXT',
                 'cleanup_requested_at': 'ALTER TABLE clients ADD COLUMN cleanup_requested_at TEXT',
                 'cleanup_completed_at': 'ALTER TABLE clients ADD COLUMN cleanup_completed_at TEXT',
-                'revoke_after_cleanup': 'ALTER TABLE clients ADD COLUMN revoke_after_cleanup INTEGER NOT NULL DEFAULT 0'
+                'revoke_after_cleanup': 'ALTER TABLE clients ADD COLUMN revoke_after_cleanup INTEGER NOT NULL DEFAULT 0',
+                'auth_token_expires_at': 'ALTER TABLE clients ADD COLUMN auth_token_expires_at INTEGER',
+                'auth_token_rotated_at': 'ALTER TABLE clients ADD COLUMN auth_token_rotated_at INTEGER',
+                'auth_token_pending_hash': 'ALTER TABLE clients ADD COLUMN auth_token_pending_hash TEXT',
+                'auth_token_pending_generation': 'ALTER TABLE clients ADD COLUMN auth_token_pending_generation INTEGER'
             }
             for name, sql in migrations.items():
                 if name not in columns:
@@ -575,7 +626,11 @@ class ClientService(object):
         retention_cutoff = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - retention_days * 86400))
         with connect() as db:
             row = db.execute("SELECT * FROM clients WHERE client_uuid=? AND status='active'", (client_uuid or '',)).fetchone()
-            if not row or not auth_token or not secrets.compare_digest(row['auth_token_hash'] or '', token_hash(auth_token)):
+            supplied_hash = token_hash(auth_token) if auth_token else ''
+            current_match = bool(row and auth_token and secrets.compare_digest(row['auth_token_hash'] or '', supplied_hash))
+            pending_match = bool(row and auth_token and row['auth_token_pending_hash'] and
+                                 secrets.compare_digest(row['auth_token_pending_hash'], supplied_hash))
+            if not row or not (current_match or pending_match):
                 raise CertHubError('客户端认证失败')
             self.assert_ip(row['allowed_ip'], ip)
             enforce_rate_limit('client:%s' % row['client_uuid'], 180, 300)
@@ -583,19 +638,65 @@ class ClientService(object):
                 raise CertHubError('客户端正在撤销，仅允许执行清理')
             info = system_info or {}
             now = utcnow()
+            now_epoch = int(time.time())
+            supports_rotation = version_at_least(self.field(info, 'agent_version', row['agent_version']),
+                                                 '0.3.15' if row['platform'] == 'linux' else '0.3.13')
+            expired = bool(current_match and row['auth_token_expires_at'] and row['auth_token_expires_at'] <= now_epoch)
+            if expired and (action != 'pull' or not supports_rotation):
+                raise CertHubError('客户端认证凭据已过期')
+            if pending_match:
+                db.execute('''UPDATE clients SET auth_token_hash=auth_token_pending_hash,auth_token_pending_hash=NULL,
+                              auth_token_pending_generation=NULL,auth_token_rotated_at=?,auth_token_expires_at=? WHERE id=?''',
+                           (now_epoch, now_epoch + 90 * 86400, row['id']))
+                expired = False
             db.execute('UPDATE clients SET hostname=?,os_name=?,os_version=?,architecture=?,agent_version=?,last_ip=?,last_seen_at=? WHERE id=?', (self.field(info, 'hostname', row['hostname']), self.field(info, 'os_name', row['os_name']), self.field(info, 'os_version', row['os_version']), self.field(info, 'architecture', row['architecture']), self.field(info, 'agent_version', row['agent_version']), ip, now, row['id']))
             if action in ('pull', 'bundle'):
                 cursor = db.execute('INSERT INTO pull_events(client_id,certificate_id,action,ip_address,hostname,os_name,os_version,architecture,agent_version,success,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (row['id'], certificate_id, action, ip, self.field(info, 'hostname'), self.field(info, 'os_name'), self.field(info, 'os_version'), self.field(info, 'architecture'), self.field(info, 'agent_version'), 1, now))
                 if cursor.lastrowid and cursor.lastrowid % 100 == 0:
                     db.execute('DELETE FROM pull_events WHERE id <= COALESCE((SELECT id FROM pull_events ORDER BY id DESC LIMIT 1 OFFSET ?), 0)', (MAX_PULL_EVENTS,))
             db.execute('DELETE FROM pull_events WHERE created_at<?', (retention_cutoff,))
-            return dict(row)
+            result = dict(row)
+            result['_auth_expired'] = expired
+            result['_supports_auth_rotation'] = supports_rotation
+            return result
+
+    def issue_auth_rotation(self, client):
+        if not client.get('_supports_auth_rotation') or client.get('revoke_after_cleanup'):
+            return None
+        now = int(time.time())
+        with connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('''SELECT client_uuid,auth_token_expires_at,auth_token_rotated_at,
+                                auth_token_pending_hash,auth_token_pending_generation
+                                FROM clients WHERE id=? AND status='active' AND revoke_after_cleanup=0''',
+                             (client['id'],)).fetchone()
+            if not row:
+                return None
+            if row['auth_token_pending_hash'] and row['auth_token_pending_generation']:
+                token = derived_auth_token(row['client_uuid'], row['auth_token_pending_generation'])
+                if secrets.compare_digest(token_hash(token), row['auth_token_pending_hash']):
+                    return {'token': token, 'expires_at': now + 90 * 86400}
+                raise CertHubError('客户端轮换凭据状态无效')
+            if not row['auth_token_expires_at'] or not row['auth_token_rotated_at']:
+                db.execute('UPDATE clients SET auth_token_rotated_at=?,auth_token_expires_at=? WHERE id=?',
+                           (now, now + 90 * 86400, client['id']))
+                return None
+            if not client.get('_auth_expired') and row['auth_token_rotated_at'] > now - 30 * 86400:
+                return None
+            generation = int(now * 1000) ^ secrets.randbits(31)
+            token = derived_auth_token(row['client_uuid'], generation)
+            db.execute('UPDATE clients SET auth_token_pending_hash=?,auth_token_pending_generation=? WHERE id=?',
+                       (token_hash(token), generation, client['id']))
+            return {'token': token, 'expires_at': now + 90 * 86400}
 
     def assignments(self, client_id):
         with connect() as db:
-            rows = db.execute('''SELECT c.id,c.name,c.source_path,c.subject_name,c.sans_json,c.fingerprint,c.not_after,g.effect,g.install_profile,g.target_fullchain,g.target_private_key
-                                 FROM grants g JOIN certificates c ON c.id=g.certificate_id
-                                 WHERE g.client_id=? AND g.effect='allow' ORDER BY c.name''', (client_id,)).fetchall()
+            rows = db.execute('''SELECT cert.id,cert.name,cert.source_path,cert.subject_name,cert.sans_json,cert.fingerprint,cert.not_after,
+                                        g.effect,g.install_profile,g.target_fullchain,g.target_private_key
+                                 FROM grants g JOIN certificates cert ON cert.id=g.certificate_id
+                                 JOIN clients client ON client.id=g.client_id
+                                 WHERE g.client_id=? AND g.effect='allow' AND client.status='active'
+                                 AND client.revoke_after_cleanup=0 ORDER BY cert.name''', (client_id,)).fetchall()
         result = []
         scanner = CertificateScanner()
         for row in rows:
@@ -657,7 +758,9 @@ class ClientService(object):
             row = db.execute('SELECT cleanup_token,revoke_after_cleanup FROM clients WHERE id=?', (client_id,)).fetchone()
             if row and row['cleanup_token'] and secrets.compare_digest(row['cleanup_token'], str(command_token or '')):
                 if row['revoke_after_cleanup']:
-                    db.execute("UPDATE clients SET cleanup_token=NULL,cleanup_completed_at=?,revoke_after_cleanup=0,status='revoked',auth_token_hash=NULL,revoked_at=? WHERE id=?", (utcnow(), utcnow(), client_id))
+                    db.execute("""UPDATE clients SET cleanup_token=NULL,cleanup_completed_at=?,revoke_after_cleanup=0,status='revoked',
+                               auth_token_hash=NULL,auth_token_pending_hash=NULL,auth_token_pending_generation=NULL,
+                               auth_token_expires_at=NULL,revoked_at=? WHERE id=?""", (utcnow(), utcnow(), client_id))
                 else:
                     db.execute('UPDATE clients SET cleanup_token=NULL,cleanup_completed_at=? WHERE id=?', (utcnow(), client_id))
 
@@ -683,7 +786,9 @@ class ClientService(object):
 
     def bundle(self, client_id, certificate_id):
         with connect() as db:
-            grant = db.execute("SELECT * FROM grants WHERE client_id=? AND certificate_id=? AND effect='allow'", (client_id, certificate_id)).fetchone()
+            grant = db.execute("""SELECT g.* FROM grants g JOIN clients c ON c.id=g.client_id
+                                WHERE g.client_id=? AND g.certificate_id=? AND g.effect='allow'
+                                AND c.status='active' AND c.revoke_after_cleanup=0""", (client_id, certificate_id)).fetchone()
         if not grant:
             raise CertHubError('客户端没有此证书权限')
         bundle = CertificateScanner().read_bundle(certificate_id)

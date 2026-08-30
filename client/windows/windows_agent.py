@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "0.3.12"
+VERSION = "0.3.13"
 POLL_SECONDS = 300
 PROGRAM_DATA = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "CertHub"
 CONFIG_FILE = PROGRAM_DATA / "config.protected"
@@ -280,9 +280,25 @@ def deployment_signature(server_config: dict) -> str:
     return json.dumps({"mode": server_config.get("deploy_mode") or "user-home", "path": server_config.get("download_path") or ""}, sort_keys=True, separators=(",", ":"))
 
 
-def clear_managed_destination(value: str) -> None:
+def migrate_managed_markers(state: dict) -> None:
+    for certificate_id, value in (state.get("managed_by_certificate") or {}).items():
+        try:
+            path = Path(value).resolve()
+            marker = path / ".certhub-managed"
+            if not marker.exists() and (path / "fullchain.pem").is_file() and (path / "privkey.pem").is_file():
+                marker.write_text(str(certificate_id), encoding="ascii")
+        except Exception:
+            logging.exception("failed to migrate managed certificate marker")
+
+
+def clear_managed_destination(value: str, certificate_id: str) -> None:
     path = Path(value).resolve()
     if path.parent == path or len(path.parts) < 3:
+        return
+    try:
+        if (path / ".certhub-managed").read_text(encoding="ascii").strip() != str(certificate_id):
+            return
+    except OSError:
         return
     for name in ("fullchain.pem", "privkey.pem", ".certhub-managed"):
         try:
@@ -296,9 +312,10 @@ def clear_managed_destination(value: str) -> None:
 
 
 def clear_managed_certificates(state: dict, include_versions: bool = True) -> None:
-    for value in state.get("managed_destinations") or []:
+    migrate_managed_markers(state)
+    for certificate_id, value in (state.get("managed_by_certificate") or {}).items():
         try:
-            clear_managed_destination(value)
+            clear_managed_destination(value, str(certificate_id))
         except Exception:
             logging.exception("failed to remove managed certificate destination")
     if include_versions:
@@ -367,9 +384,17 @@ def sync_once(force: bool = False) -> None:
     config = read_config()
     pulled = request(config["api_endpoint"], "pull", {"system": system_info()}, config)
     server_config = pulled.get("config") or {}
+    rotation = server_config.pop("auth_token_rotation", {}) or {}
+    rotated_token = str(rotation.get("token") or "")
+    if rotated_token:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,}", rotated_token):
+            raise ValueError("invalid rotated authentication token")
+        config["auth_token"] = rotated_token
+        write_config(config)
     if server_config.get("update"):
         apply_client_update(server_config["update"], config)
     state = read_state()
+    migrate_managed_markers(state)
     cleanup = server_config.get("cleanup") or {}
     if cleanup.get("command_token"):
         clear_managed_certificates(state, True)
@@ -396,7 +421,7 @@ def sync_once(force: bool = False) -> None:
         expected = str(destination_for(certificate_names[certificate_id], server_config, config).resolve()) if certificate_id in certificate_names else ""
         recorded = str(Path(managed_by_certificate[certificate_id]).resolve()) if certificate_id in managed_by_certificate else ""
         if expected and recorded == expected and recorded not in authorized_paths:
-            clear_managed_destination(recorded)
+            clear_managed_destination(recorded, certificate_id)
         shutil.rmtree(PROGRAM_DATA / "versions" / certificate_id, ignore_errors=True)
         versions.pop(certificate_id, None)
         managed_by_certificate.pop(certificate_id, None)

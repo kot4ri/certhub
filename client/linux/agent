@@ -8,7 +8,7 @@ POLL_SECONDS=300
 cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
 system_json(){ python3 - <<'PY'
 import json,platform
-i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.14'}
+i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.15'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
@@ -28,15 +28,24 @@ sync_once(){
   local force=${1:-0} api client token sysinfo response interval last now payload
   [[ -f $STATE/initial-sync-complete ]] || force=1
   api=$(cfg api_endpoint); client=$(cfg client_id); token=$(cfg auth_token); sysinfo=$(system_json)
-  local auth=(-H "X-CertHub-Client: $client" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
+  local auth_file
+  auth_file=$(mktemp "$STATE/.headers.XXXXXX")
+  chmod 0600 "$auth_file"
+  printf 'X-CertHub-Client: %s\nAuthorization: Bearer %s\nContent-Type: application/json\n' "$client" "$token" > "$auth_file"
+  local auth=(-H "@$auth_file")
+  trap 'rm -f "$auth_file"' RETURN EXIT
   response=$(mktemp "$STATE/.pull.XXXXXX")
   payload=$(printf '{"system":%s}' "$sysinfo")
   if ! curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=pull" -o "$response";then
     rm -f "$response";return 1
   fi
-  python3 - "$response" "$STATE/server-config.json" <<'PY'
+  python3 - "$response" "$STATE/server-config.json" "$CONFIG" <<'PY'
 import json,os,sys
 r=json.load(open(sys.argv[1]));d=r.get('data') or {};c=d.get('config') or {}
+rotation=c.pop('auth_token_rotation',{}) or {};new_token=rotation.get('token') or ''
+if new_token:
+ client=json.load(open(sys.argv[3]));client['auth_token']=new_token
+ tmp=sys.argv[3]+'.new';json.dump(client,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,sys.argv[3])
 tmp=sys.argv[2]+'.new';json.dump(c,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,sys.argv[2])
 PY
   mapfile -t update_info < <(python3 - "$STATE/server-config.json" <<'PY'
@@ -46,7 +55,7 @@ for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
 PY
 )
   if [[ -n ${update_info[0]:-} ]]; then
-    if [[ ${update_info[1]} == 0.3.14 ]]; then
+    if [[ ${update_info[1]} == 0.3.15 ]]; then
       payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
       curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
     else
@@ -71,11 +80,19 @@ import json,os,shutil,sys
 config=json.load(open(sys.argv[1]));state_path=sys.argv[2]
 try: state=json.load(open(state_path))
 except Exception: state={}
-def clear(paths):
- for value in paths:
+managed={str(k):v for k,v in (state.get('managed_by_certificate') or {}).items() if isinstance(v,str)}
+for cert_id,value in managed.items():
+ try:
+  path=os.path.realpath(value);marker=os.path.join(path,'.certhub-managed')
+  if not os.path.exists(marker) and os.path.isfile(os.path.join(path,'fullchain.pem')) and os.path.isfile(os.path.join(path,'privkey.pem')):
+   open(marker,'w').write(cert_id+'\n');os.chmod(marker,0o600)
+ except Exception:pass
+def clear(items):
+ for cert_id,value in items.items():
   try:
    path=os.path.realpath(value)
-   if path.startswith('/') and len([x for x in path.split('/') if x])>=2:
+   marker=os.path.join(path,'.certhub-managed')
+   if path.startswith('/') and len([x for x in path.split('/') if x])>=2 and open(marker).read().strip()==cert_id:
     for name in ('fullchain.pem','privkey.pem','info.json','.certhub-managed'):
      try:os.unlink(os.path.join(path,name))
      except FileNotFoundError:pass
@@ -85,7 +102,7 @@ def clear(paths):
 cleanup=(config.get('cleanup') or {}).get('command_token') or ''
 signature=json.dumps({'mode':config.get('deploy_mode') or 'files-only','path':config.get('download_path') or ''},sort_keys=True,separators=(',',':'))
 changed=state.get('signature')!=signature
-if cleanup or changed:clear(state.get('managed_paths') or [])
+if cleanup or changed:clear(managed)
 if cleanup:shutil.rmtree(sys.argv[3],ignore_errors=True)
 if cleanup or changed:
  tmp=state_path+'.new';json.dump({'signature':signature,'managed_paths':[]},open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,state_path)
@@ -109,9 +126,12 @@ except Exception: versions={}
 managed={str(k):v for k,v in (state.get('managed_by_certificate') or {}).items() if isinstance(v,str)}
 legacy=set(v for v in (state.get('managed_paths') or []) if isinstance(v,str))
 authorized={str(item['id']):item for item in items}
-def clear_destination(path):
+def clear_destination(path,cert_id):
  path=os.path.realpath(path)
  if not path.startswith('/') or len([x for x in path.split('/') if x])<2:return
+ try:
+  if open(os.path.join(path,'.certhub-managed')).read().strip()!=str(cert_id):return
+ except OSError:return
  for name in ('fullchain.pem','privkey.pem','info.json','.certhub-managed'):
   try:os.unlink(os.path.join(path,name))
   except FileNotFoundError:pass
@@ -140,7 +160,7 @@ for cert_id in set(str(k) for k in versions)-set(authorized):
  expected=expected_path(item) if item else None
  candidate=managed.get(cert_id) or (expected if expected in legacy else None)
  if candidate and expected and os.path.realpath(candidate)==expected and expected not in authorized_paths:
-  clear_destination(expected)
+  clear_destination(expected,cert_id)
  shutil.rmtree(os.path.join(cert_root,cert_id),ignore_errors=True)
  versions.pop(cert_id,None);managed.pop(cert_id,None)
 state['managed_by_certificate']=managed
@@ -200,7 +220,11 @@ key_pub=subprocess.check_output(['openssl','pkey','-in',work+'/privkey.pem','-pu
 if cert_pub!=key_pub:raise SystemExit('证书与私钥不匹配')
 version=d['version'];cert_id=str(d['certificate_id']);final=os.path.join(state,'certificates',cert_id,version)
 os.makedirs(os.path.dirname(final),mode=0o700,exist_ok=True)
+for name in ('request.json','bundle.json'):
+ try:os.unlink(os.path.join(work,name))
+ except FileNotFoundError:pass
 if not os.path.isdir(final):os.rename(work,final)
+else:shutil.rmtree(work,ignore_errors=True)
 current=os.path.join(state,'certificates',cert_id,'current');tmp=current+'.new'
 try:os.unlink(tmp)
 except FileNotFoundError:pass

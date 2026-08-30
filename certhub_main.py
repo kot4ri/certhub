@@ -217,7 +217,9 @@ class certhub_main(object):
                 if cleanup and row['status'] == 'active':
                     db.execute('UPDATE clients SET cleanup_token=?,cleanup_requested_at=?,cleanup_completed_at=NULL,revoke_after_cleanup=1 WHERE id=?', (os.urandom(24).hex(), utcnow(), client_id))
                 else:
-                    db.execute("UPDATE clients SET status='revoked',auth_token_hash=NULL,cleanup_token=NULL,revoke_after_cleanup=0,revoked_at=? WHERE id=?", (utcnow(), client_id))
+                    db.execute("""UPDATE clients SET status='revoked',auth_token_hash=NULL,auth_token_pending_hash=NULL,
+                               auth_token_pending_generation=NULL,auth_token_expires_at=NULL,cleanup_token=NULL,
+                               revoke_after_cleanup=0,revoked_at=? WHERE id=?""", (utcnow(), client_id))
             audit('client.revoke', 'client', client_id)
             return self.ok(None, '清理指令已下发，客户端完成后将自动撤销' if cleanup and row['status'] == 'active' else '客户端已撤销')
         return self.guard(run)
@@ -244,7 +246,8 @@ class certhub_main(object):
                 if row['status'] != 'revoked':
                     raise CertHubError('只能恢复已撤销的客户端')
                 db.execute("""UPDATE clients SET status='pending',revoked_at=NULL,auth_token_hash=NULL,
-                             cleanup_token=NULL,revoke_after_cleanup=0,force_sync_token=NULL,update_token=NULL
+                             auth_token_pending_hash=NULL,auth_token_pending_generation=NULL,auth_token_expires_at=NULL,
+                             auth_token_rotated_at=NULL,cleanup_token=NULL,revoke_after_cleanup=0,force_sync_token=NULL,update_token=NULL
                              WHERE id=?""", (client_id,))
             result = ClientService().reissue_enrollment(client_id)
             audit('client.restore', 'client', client_id)
