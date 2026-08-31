@@ -368,6 +368,7 @@
                   '">' +
                   esc(error || (managed ? "已纳管" : "未纳管")) +
                   "</span></td><td>" +
+                  '<div class="certificate-row-action">' +
                   (managed
                     ? '<button class="btn danger remove" data-id="' +
                       managed.id +
@@ -377,7 +378,7 @@
                       : '<button class="btn manage" data-i="' +
                         index +
                         '">纳管</button>') +
-                  "</td></tr>"
+                  "</div></td></tr>"
                   );
                 },
               )
@@ -699,18 +700,19 @@
                 "</span></div></td><td>" +
                 esc(r.status) +
                 "</td><td>" +
+                '<div class="client-row-actions">' +
                 (r.status === "pending"
                   ? '<button class="btn enroll" data-id="' +
                     r.id +
-                    '">安装命令</button> '
+                    '">安装命令</button>'
                   : "") +
                 '<button class="btn edit" data-id="' +
                 r.id +
-                '">编辑</button> <button class="btn danger revoke" data-id="' +
+                '">编辑</button><button class="btn danger revoke" data-id="' +
                 r.id +
-                '">撤权</button> <button class="btn danger delete" data-id="' +
+                '">撤权</button><button class="btn danger delete" data-id="' +
                 r.id +
-                '">删除</button></td></tr>'
+                '">删除</button></div></td></tr>'
               );
             })
             .join("");
