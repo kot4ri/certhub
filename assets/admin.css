@@ -445,6 +445,8 @@
       .client-batch-bar > .btn { min-width:112px; }
       .client-select, #selectAll { width:16px; height:16px; min-height:0; margin:0; padding:0; vertical-align:middle; accent-color:var(--green); }
       .client-table th:first-child, .client-table td:first-child { width:48px; min-width:48px; text-align:center; vertical-align:middle; }
+      .client-row-actions { display:flex; align-items:center; gap:7px; }
+      .client-row-actions .btn { display:inline-flex; min-width:64px; align-items:center; justify-content:center; white-space:nowrap; }
       .btn-secondary { border-color:#dce2eb; background:#fff; color:#42506a; box-shadow:none; }
       .btn-secondary:hover { border-color:#b9c3d2; background:#f7f9fb; color:#25324a; box-shadow:none; }
       .action-menu { position:relative; }
@@ -541,6 +543,8 @@
         .client-batch-bar { flex-direction:row; }
         .client-batch-bar .action-menu { width:auto; }
         .client-batch-bar .action-menu > .btn { width:auto; justify-content:center; }
+        .client-row-actions { width:152px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+        .client-row-actions .btn { width:100%; min-width:0; padding-right:8px; padding-left:8px; }
         .update-heading, .update-footer { align-items:flex-start; flex-direction:column; }
         .update-actions { width:100%; flex-wrap:wrap; }
         .action-menu-popover { left:0; right:auto; width:min(260px,calc(100vw - 32px)); }
