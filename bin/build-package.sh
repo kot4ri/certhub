@@ -13,7 +13,7 @@ fi
 mkdir -p "$RELEASE_DIR"
 cd "$PROJECT_DIR/.."
 zip -qr -FS "$OUTPUT" certhub \
-    -x 'certhub/.git/*' 'certhub/__pycache__/*' 'certhub/**/__pycache__/*' 'certhub/release/*' 'certhub/*.db*' 'certhub/*.key' 'certhub/*.token'
+    -x 'certhub/.git/*' 'certhub/__pycache__/*' 'certhub/**/__pycache__/*' 'certhub/release/*' 'certhub/CHANGELOG.md' 'certhub/*.db*' 'certhub/*.key' 'certhub/*.token'
 sha256sum "$OUTPUT" > "$OUTPUT.sha256"
 if [[ -n "${CERTHUB_SIGNING_KEY:-}" ]]; then
     [[ -f "$CERTHUB_SIGNING_KEY" ]] || { echo '发布签名私钥不存在。' >&2; exit 1; }

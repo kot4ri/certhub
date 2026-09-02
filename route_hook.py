@@ -46,7 +46,7 @@ def handle_request():
         service = ClientService()
         ip = public.GetClientIp()
         if request.method == 'GET' and action == 'health':
-            return response({'status': True, 'data': {'service': 'CertHub', 'version': '1.2.1'}})
+            return response({'status': True, 'data': {'service': 'CertHub', 'version': '1.3.0'}})
         if request.method == 'GET' and action == 'author_avatar':
             path = os.path.join(PLUGIN_DIR, 'assets', 'kot4ri.jpg')
             with open(path, 'rb') as handle:
