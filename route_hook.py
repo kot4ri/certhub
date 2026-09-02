@@ -162,6 +162,9 @@ def handle_request():
         if request.method == 'POST' and action == 'ack_cleanup':
             service.acknowledge_cleanup(client['id'], data.get('command_token'))
             return response({'status': True, 'data': {}})
+        if request.method == 'POST' and action == 'ack_certificate_cleanup':
+            service.acknowledge_certificate_cleanup(client['id'], data.get('command_tokens') or [])
+            return response({'status': True, 'data': {}})
         return response({'status': False, 'error': 'not_found'}, 404)
     except CertHubError as exc:
         message = str(exc)

@@ -8,7 +8,7 @@ POLL_SECONDS=300
 cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
 system_json(){ python3 - <<'PY'
 import json,platform
-i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.16'}
+i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.17'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
@@ -55,7 +55,7 @@ for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
 PY
 )
   if [[ -n ${update_info[0]:-} ]]; then
-    if [[ ${update_info[1]} == 0.3.16 ]]; then
+    if [[ ${update_info[1]} == 0.3.17 ]]; then
       payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
       curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
     else
@@ -114,8 +114,38 @@ PY
     curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_cleanup" >/dev/null
     rm -f "$response";return 0
   fi
+  local certificate_cleanup_tokens
+  certificate_cleanup_tokens=$(python3 - "$STATE/server-config.json" <<'PY'
+import json,os,shutil,sqlite3,ssl,sys
+config=json.load(open(sys.argv[1]));tasks=config.get('certificate_cleanup') or []
+saved_root='/www/server/panel/vhost/ssl_saved';db_path='/www/server/panel/data/db/ssl_data.db';removed=[];done=[]
+def identity(path):
+ try:
+  x=ssl._ssl._test_decode_cert(path)
+  return tuple(sorted(set(v.lower() for k,v in x.get('subjectAltName',[]) if k=='DNS')))
+ except Exception:return ()
+for task in tasks:
+ wanted=tuple(sorted(set(str(x).lower() for x in (task.get('sans') or []))))
+ if not wanted:continue
+ for name in os.listdir(saved_root) if os.path.isdir(saved_root) else []:
+  folder=os.path.join(saved_root,name)
+  if identity(os.path.join(folder,'fullchain.pem'))==wanted:
+   shutil.rmtree(folder,ignore_errors=True);removed.append(name)
+ done.append(str(task.get('command_token') or ''))
+if removed and os.path.isfile(db_path):
+ try:
+  with sqlite3.connect(db_path,timeout=15) as db:
+   db.executemany('DELETE FROM ssl_info WHERE hash=?',[(x,) for x in set(removed)])
+ except Exception:pass
+print(json.dumps([x for x in done if x],separators=(',',':')))
+PY
+)
+  if [[ $certificate_cleanup_tokens != '[]' ]]; then
+    payload=$(printf '{"command_tokens":%s,"system":%s}' "$certificate_cleanup_tokens" "$sysinfo")
+    curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_certificate_cleanup" >/dev/null
+  fi
   python3 - "$response" "$STATE/server-config.json" "$STATE/deployment-state.json" "$STATE/certificate-versions.json" "$STATE/certificates" <<'PY'
-import json,os,re,shutil,sys
+import hashlib,json,os,re,shutil,sqlite3,sys
 response_path,config_path,state_path,versions_path,cert_root=sys.argv[1:6]
 items=(json.load(open(response_path)).get('data') or {}).get('certificates',[])
 config=json.load(open(config_path))
@@ -137,6 +167,30 @@ def clear_destination(path,cert_id):
   except FileNotFoundError:pass
  try:os.rmdir(path)
  except OSError:pass
+def pem_hash(path):
+ try:return hashlib.sha256(open(path,'rb').read().strip()).hexdigest()
+ except OSError:return None
+def clear_saved_versions(cert_id):
+ # 宝塔会把注册证书另存到 ssl_saved；按 CertHub 缓存中的实际 PEM
+ # 精确识别归属，避免仅凭域名删除客户端自行维护的证书。
+ fingerprints=set()
+ version_root=os.path.join(cert_root,str(cert_id))
+ for root,dirs,files in os.walk(version_root) if os.path.isdir(version_root) else []:
+  if 'fullchain.pem' in files:
+   value=pem_hash(os.path.join(root,'fullchain.pem'))
+   if value:fingerprints.add(value)
+ if not fingerprints:return
+ saved_root='/www/server/panel/vhost/ssl_saved';removed=[]
+ for name in os.listdir(saved_root) if os.path.isdir(saved_root) else []:
+  folder=os.path.join(saved_root,name)
+  if pem_hash(os.path.join(folder,'fullchain.pem')) in fingerprints:
+   shutil.rmtree(folder,ignore_errors=True);removed.append(name)
+ db_path='/www/server/panel/data/db/ssl_data.db'
+ if removed and os.path.isfile(db_path):
+  try:
+   with sqlite3.connect(db_path,timeout=15) as db:
+    db.executemany('DELETE FROM ssl_info WHERE hash=?',[(x,) for x in removed])
+  except Exception:pass
 def expected_path(item):
  mode=config.get('deploy_mode') or 'files-only'
  if mode=='custom':
@@ -161,6 +215,7 @@ for cert_id in set(str(k) for k in versions)-set(authorized):
  candidate=managed.get(cert_id) or (expected if expected in legacy else None)
  if candidate and expected and os.path.realpath(candidate)==expected and expected not in authorized_paths:
   clear_destination(expected,cert_id)
+ clear_saved_versions(cert_id)
  shutil.rmtree(os.path.join(cert_root,cert_id),ignore_errors=True)
  versions.pop(cert_id,None);managed.pop(cert_id,None)
 state['managed_by_certificate']=managed
@@ -209,7 +264,7 @@ PY
     printf '{"certificate_id":%s,"system":%s}' "$cert_id" "$sysinfo" > "$work/request.json"
     curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "@$work/request.json" "$api?action=bundle" -o "$work/bundle.json"
     python3 - "$work" "$STATE" "$STATE/server-config.json" <<'PY'
-import json,os,re,shutil,ssl,subprocess,sys,time
+import json,os,re,shutil,sqlite3,ssl,subprocess,sys,time
 work,state,config_path=sys.argv[1:4];d=(json.load(open(work+'/bundle.json')).get('data') or {})
 if not d.get('fullchain_pem') or not d.get('private_key_pem'):raise SystemExit('证书响应无效')
 for key,name,mode in [('fullchain_pem','fullchain.pem',0o644),('private_key_pem','privkey.pem',0o600)]:
@@ -248,6 +303,27 @@ elif deploy_mode=='bt-panel':
  managed_path=legacy
  if os.path.isfile(py):
   try:subprocess.run([py,'-c','import sys;sys.path.insert(0,"/www/server/panel/class");from ssl_manage import SSLManger;SSLManger().save_by_file(sys.argv[1],sys.argv[2])',final+'/fullchain.pem',final+'/privkey.pem'],check=True)
+  except Exception:pass
+ # 宝塔按证书内容生成独立 ssl_saved 记录。完整 SAN 相同的证书只保留
+ # 本次刚拉取的版本，避免每次续签都在证书夹堆积旧证书与私钥。
+ saved_root=panel+'/vhost/ssl_saved';current_pem=open(final+'/fullchain.pem','rb').read().strip()
+ current_hash=None;stale=[]
+ for saved_name in os.listdir(saved_root) if os.path.isdir(saved_root) else []:
+  saved_dir=os.path.join(saved_root,saved_name);saved_pem=os.path.join(saved_dir,'fullchain.pem')
+  try:
+   saved_identity=identity(saved_pem) if 'identity' in locals() else None
+   if saved_identity is None:
+    x=ssl._ssl._test_decode_cert(saved_pem);saved_identity=(next((v.lower() for g in x.get('subject',[]) for k,v in g if k=='commonName'),''),tuple(sorted(v.lower() for k,v in x.get('subjectAltName',[]) if k=='DNS')))
+   incoming_identity=(cn.lower(),tuple(sans))
+   if open(saved_pem,'rb').read().strip()==current_pem:current_hash=saved_name
+   elif saved_identity[1]==incoming_identity[1]:stale.append((saved_name,saved_dir))
+  except Exception:pass
+ for saved_name,saved_dir in stale:shutil.rmtree(saved_dir,ignore_errors=True)
+ db_path=panel+'/data/db/ssl_data.db'
+ if stale and os.path.isfile(db_path):
+  try:
+   with sqlite3.connect(db_path,timeout=15) as db:
+    db.executemany('DELETE FROM ssl_info WHERE hash=?',[(x[0],) for x in stale])
   except Exception:pass
  if config.get('auto_deploy_sites'):
   def identity(path):

@@ -5,7 +5,7 @@
   "ps": "直接读取宝塔本地证书并按客户端权限分发，使用面板原生 Python 与 SQLite",
   "versions": "1.2.1",
   "windows_agent_version": "0.3.13",
-  "linux_agent_version": "0.3.16",
+  "linux_agent_version": "0.3.17",
   "shell": "install.sh",
   "checks": "/www/server/panel/plugin/certhub",
   "author": "Kot4ri",

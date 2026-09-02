@@ -215,6 +215,16 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   metadata_json TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS certificate_cleanup_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  san_key TEXT NOT NULL,
+  sans_json TEXT NOT NULL,
+  command_token TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  UNIQUE(client_id,san_key)
+);
 CREATE TABLE IF NOT EXISTS rate_limits (
   rate_key TEXT PRIMARY KEY,
   window_started_at INTEGER NOT NULL,
@@ -257,6 +267,19 @@ def initialize():
             for name, sql in migrations.items():
                 if name not in columns:
                     db.execute(sql)
+            # Recover cleanup ownership for clients upgraded from agents which did
+            # not remember the bt-panel ssl_saved record created by save_by_file.
+            legacy = db.execute('''SELECT DISTINCT p.client_id,c.sans_json FROM pull_events p
+                                   JOIN certificates c ON c.id=p.certificate_id
+                                   WHERE p.action='bundle' AND NOT EXISTS(
+                                     SELECT 1 FROM grants g WHERE g.client_id=p.client_id
+                                     AND g.certificate_id=p.certificate_id AND g.effect='allow')''').fetchall()
+            for item in legacy:
+                sans = sorted(set(str(x).lower() for x in json.loads(item['sans_json'] or '[]')))
+                key = json.dumps(sans, separators=(',', ':'))
+                db.execute('''INSERT OR IGNORE INTO certificate_cleanup_tasks
+                              (client_id,san_key,sans_json,command_token,created_at)
+                              VALUES(?,?,?,?,?)''', (item['client_id'], key, key, token_urlsafe(24), utcnow()))
             db.commit()
         finally:
             db.close()
@@ -510,10 +533,28 @@ class ClientService(object):
             if not row:
                 raise CertHubError('客户端不存在')
             config = self.validate_config(row['platform'], options or {})
+            selected_ids = sorted(set(int(x) for x in certificate_ids if int(x) > 0))
+            old_rows = db.execute('''SELECT c.id,c.sans_json FROM grants g JOIN certificates c ON c.id=g.certificate_id
+                                     WHERE g.client_id=? AND g.effect='allow' ''', (client_id,)).fetchall()
+            selected_sans = set()
+            if selected_ids:
+                marks = ','.join('?' for _ in selected_ids)
+                for item in db.execute('SELECT sans_json FROM certificates WHERE id IN (%s)' % marks, selected_ids):
+                    selected_sans.add(json.dumps(sorted(set(str(x).lower() for x in json.loads(item['sans_json'] or '[]'))), separators=(',', ':')))
+            for item in old_rows:
+                key = json.dumps(sorted(set(str(x).lower() for x in json.loads(item['sans_json'] or '[]'))), separators=(',', ':'))
+                if item['id'] not in selected_ids and key not in selected_sans:
+                    db.execute('''INSERT INTO certificate_cleanup_tasks(client_id,san_key,sans_json,command_token,created_at,completed_at)
+                                  VALUES(?,?,?,?,?,NULL) ON CONFLICT(client_id,san_key) DO UPDATE SET
+                                  sans_json=excluded.sans_json,command_token=excluded.command_token,
+                                  created_at=excluded.created_at,completed_at=NULL''',
+                               (client_id, key, key, token_urlsafe(24), now))
+                elif key in selected_sans:
+                    db.execute('DELETE FROM certificate_cleanup_tasks WHERE client_id=? AND san_key=?', (client_id, key))
             db.execute('''UPDATE clients SET name=?,allowed_ip=?,deploy_mode=?,download_path=?,auto_deploy_sites=?,sync_interval_seconds=?,sync_schedule=?,config_updated_at=? WHERE id=?''',
                        (name, config['allowed_ip'], config['deploy_mode'], config['download_path'], config['auto_deploy_sites'], config['sync_interval_seconds'], config['sync_schedule'], now, client_id))
             db.execute('DELETE FROM grants WHERE client_id=?', (client_id,))
-            for certificate_id in sorted(set(int(x) for x in certificate_ids if int(x) > 0)):
+            for certificate_id in selected_ids:
                 db.execute("INSERT INTO grants(client_id,certificate_id,effect,updated_at) VALUES(?,?, 'allow',?)", (client_id, certificate_id, now))
         audit('client.update', 'client', client_id, {'certificate_ids': certificate_ids})
 
@@ -714,11 +755,14 @@ class ClientService(object):
     def pull_config(self, client_id):
         with connect() as db:
             row = db.execute('''SELECT platform,deploy_mode,download_path,auto_deploy_sites,sync_schedule,config_updated_at,force_sync_token,update_token,cleanup_token FROM clients WHERE id=?''', (client_id,)).fetchone()
+            cleanup_rows = db.execute('''SELECT command_token,sans_json FROM certificate_cleanup_tasks
+                                         WHERE client_id=? AND completed_at IS NULL ORDER BY id''', (client_id,)).fetchall()
         if not row:
             return {}
         if row['cleanup_token']:
             return {'cleanup': {'command_token': row['cleanup_token']}}
         result = dict(row)
+        result['certificate_cleanup'] = [{'command_token': x['command_token'], 'sans': json.loads(x['sans_json'])} for x in cleanup_rows]
         if row['update_token']:
             info_path = os.path.join(PLUGIN_DIR, 'info.json')
             with open(info_path, 'r', encoding='utf-8') as handle:
@@ -733,6 +777,16 @@ class ClientService(object):
                                 'url': setting('panel_base_url').rstrip('/') + '/certhub-api?action=' + action}
         result.pop('platform', None); result.pop('update_token', None); result.pop('cleanup_token', None)
         return result
+
+    def acknowledge_certificate_cleanup(self, client_id, command_tokens):
+        tokens = [str(x) for x in (command_tokens or []) if isinstance(x, str) and x]
+        if not tokens:
+            return
+        marks = ','.join('?' for _ in tokens)
+        with connect() as db:
+            db.execute('''UPDATE certificate_cleanup_tasks SET completed_at=?
+                          WHERE client_id=? AND completed_at IS NULL AND command_token IN (%s)''' % marks,
+                       [utcnow(), client_id] + tokens)
 
     def acknowledge_force_sync(self, client_id, command_token):
         with connect() as db:
