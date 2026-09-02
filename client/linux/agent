@@ -8,7 +8,7 @@ POLL_SECONDS=300
 cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
 system_json(){ python3 - <<'PY'
 import json,platform
-i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.17'}
+i={'hostname':platform.node(),'os_name':platform.system(),'os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.18'}
 try:
  for line in open('/etc/os-release'):
   if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
@@ -55,7 +55,7 @@ for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
 PY
 )
   if [[ -n ${update_info[0]:-} ]]; then
-    if [[ ${update_info[1]} == 0.3.17 ]]; then
+    if [[ ${update_info[1]} == 0.3.18 ]]; then
       payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
       curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
     else
@@ -350,6 +350,13 @@ elif deploy_mode=='bt-panel':
     except FileNotFoundError:pass
    if os.path.isfile('/www/server/nginx/sbin/nginx'):subprocess.run(['/www/server/nginx/sbin/nginx','-s','reload'],check=True)
    elif shutil.which('systemctl') and shutil.which('apachectl'):subprocess.run(['systemctl','reload','httpd'],check=True)
+  # 面板 HTTPS 证书不属于网站 vhost，宝塔也不会因证书夹更新而自动替换。
+  # 仅在完整 SAN 身份完全一致时更新，并延迟重启面板让本轮同步先完成回执。
+  panel_cert=panel+'/ssl/certificate.pem';panel_key=panel+'/ssl/privateKey.pem'
+  if os.path.isfile(panel_cert) and identity(panel_cert)==incoming:
+   atomic_copy(final+'/fullchain.pem',panel_cert,0o644);atomic_copy(final+'/privkey.pem',panel_key,0o600)
+   if os.path.isfile('/etc/init.d/bt'):
+    subprocess.Popen(['bash','-c','sleep 3; /etc/init.d/bt restart >/dev/null 2>&1'],start_new_session=True)
 if managed_path:
  marker=os.path.join(managed_path,'.certhub-managed');open(marker,'w').write(cert_id+'\n');os.chmod(marker,0o600)
  state_path=state+'/deployment-state.json'

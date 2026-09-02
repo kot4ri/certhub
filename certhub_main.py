@@ -144,6 +144,17 @@ class certhub_main(object):
         def run():
             certificate_id = int(self.value(get, 'id', 0))
             with connect() as db:
+                cert = db.execute('SELECT sans_json FROM certificates WHERE id=?', (certificate_id,)).fetchone()
+                clients = db.execute("SELECT client_id FROM grants WHERE certificate_id=? AND effect='allow'", (certificate_id,)).fetchall()
+                if cert:
+                    sans = sorted(set(str(x).lower() for x in json.loads(cert['sans_json'] or '[]')))
+                    san_key = json.dumps(sans, separators=(',', ':'))
+                    for client in clients:
+                        db.execute('''INSERT INTO certificate_cleanup_tasks(client_id,san_key,sans_json,command_token,created_at,completed_at)
+                                      VALUES(?,?,?,?,?,NULL) ON CONFLICT(client_id,san_key) DO UPDATE SET
+                                      sans_json=excluded.sans_json,command_token=excluded.command_token,
+                                      created_at=excluded.created_at,completed_at=NULL''',
+                                   (client['client_id'], san_key, san_key, os.urandom(24).hex(), utcnow()))
                 db.execute('DELETE FROM certificates WHERE id=?', (certificate_id,))
             audit('certificate.remove', 'certificate', certificate_id)
             return self.ok(None, '已取消纳管；源证书未被删除')
