@@ -611,7 +611,7 @@
                   ? '<span class="good" title="' +
                     esc(localTime(r.update_completed_at)) +
                     '">已更新 ' +
-                    esc(r.agent_version || r.update_completed_version || "-") +
+                    esc(r.update_completed_version || r.agent_version || "-") +
                     "</span>"
                   : "未下发",
             cleanupStatus = (r) =>

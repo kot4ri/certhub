@@ -805,7 +805,11 @@ class ClientService(object):
                     target_version = info.get(str(row['platform']) + '_agent_version') or target_version
                 except (OSError, ValueError, TypeError):
                     pass
-                db.execute('UPDATE clients SET update_token=NULL,update_completed_at=?,update_completed_version=? WHERE id=?', (utcnow(), target_version, client_id))
+                # The old process may acknowledge immediately after replacing its
+                # executable but before it has restarted. Only the target version
+                # itself is allowed to complete the update task.
+                if str(row['agent_version'] or '') == str(target_version or ''):
+                    db.execute('UPDATE clients SET update_token=NULL,update_completed_at=?,update_completed_version=? WHERE id=?', (utcnow(), target_version, client_id))
 
     def acknowledge_cleanup(self, client_id, command_token):
         with connect() as db:
