@@ -4,7 +4,15 @@
 
 面向宝塔 Linux 面板的多服务器证书分发与自动部署中心。
 
-CertHub 直接纳管宝塔面板已经签发的证书，并按照客户端权限安全地分发到 Linux 或 Windows 服务器。它不复制证书到数据库，也不要求额外部署 PHP、MySQL、Redis、Nginx 站点或独立 Web 服务。
+CertHub 直接纳管宝塔面板已经签发的证书，并按照客户端权限安全地分发到 Linux、Windows 服务器及 OpenWRT 设备。它不复制证书到数据库，也不要求额外部署 PHP、MySQL、Redis、Nginx 站点或独立 Web 服务。
+
+## 当前版本
+
+[CertHub 1.4.0](https://github.com/kot4ri/certhub/releases/tag/v1.4.0) 新增 OpenWRT 平台，支持新增、修改客户端的平台选择，并自动迁移旧数据库的平台约束。
+
+| 插件 | Linux Agent | Windows Agent | OpenWRT Agent |
+| --- | --- | --- | --- |
+| 1.4.0 | 0.3.19 | 0.3.13 | 0.3.20 |
 
 ## 为什么使用 CertHub
 
@@ -16,7 +24,7 @@ CertHub 直接纳管宝塔面板已经签发的证书，并按照客户端权限
 - Agent 每 5 分钟同步服务端配置，并按照服务端下发的五段 crontab 表达式执行证书同步；
 - 支持服务端向选中客户端下发立即拉取和 Agent 更新指令；
 - 管理页面展示客户端系统、Agent 版本、在线状态、任务状态及操作日志；
-- Linux 与 Windows Agent 可分别更新，互不影响。
+- Linux、Windows 与 OpenWRT Agent 按平台独立分发和更新。
 
 ## 工作方式
 
@@ -27,7 +35,8 @@ CertHub 直接纳管宝塔面板已经签发的证书，并按照客户端权限
 CertHub（宝塔 Flask Hook + SQLite）
       │ HTTPS + 独立客户端凭据 + 证书授权
       ├──────────────► Linux Agent
-      └──────────────► Windows Agent
+      ├──────────────► Windows Agent
+      └──────────────► OpenWRT Agent（procd）
 ```
 
 CertHub 通过宝塔启动 Hook 在面板自身地址注册 `/certhub-api`。管理页面使用宝塔登录态；Agent 使用每台设备独立的长期凭据。SQLite 仅保存证书元数据、客户端身份、授权、配置和日志，不保存证书或私钥正文。
@@ -53,6 +62,17 @@ CertHub 通过宝塔启动 Hook 在面板自身地址注册 `/certhub-api`。管
 - 配置和长期凭据使用 DPAPI LocalMachine 保护；
 - 不执行宝塔证书注册或虚拟主机替换。
 
+### OpenWRT
+
+- 使用 procd 管理常驻服务，支持开机启动；
+- 安装器由 BusyBox `sh` 启动，通过 opkg 或 apk 安装 bash、精简 Python 和所需依赖，无需完整 Python 环境；
+- 支持持久化托管目录和自定义下载目录，不提供客户端宝塔面板路径；
+- 默认状态与证书保存在 `/etc/certhub-agent/state`，避免 `/var`、`/tmp` 重启清空导致丢失；
+- 支持证书同步、配置更新、撤权清理、客户端撤销和 Agent 在线更新；
+- 负责证书文件同步，目标服务的证书路径和重载方式需自行配置。
+
+默认完整链和私钥分别位于 `/etc/certhub-agent/state/certificates/<id>/current/fullchain.pem` 与 `privkey.pem`。详细安装要求、服务命令和日志查看方式见 [OpenWRT Agent 说明](./client/openwrt/README.md)。
+
 ## 安装要求
 
 - 宝塔 Linux 面板；
@@ -65,10 +85,16 @@ CertHub 通过宝塔启动 Hook 在面板自身地址注册 `/certhub-api`。管
 
 ### 使用 Release 安装包
 
-1. 从 GitHub Releases 下载最新安装包；
+1. 从 [GitHub Releases](https://github.com/kot4ri/certhub/releases/latest) 下载 `certhub-<版本>.zip`；
 2. 在宝塔面板中导入第三方插件安装包；
 3. 安装完成后打开 CertHub，根据初次使用指引纳管证书并创建第一个客户端；
 4. 在设置中确认客户端能够访问的宝塔 HTTPS 地址。
+
+### 已安装版本升级
+
+在 CertHub 管理页检查更新并执行升级。正式 Release 提供插件 ZIP、`.sha256` 校验文件和 `.sig` 数字签名，面板验证校验值及发布签名后才会安装。
+
+1.4.0 会自动扩展旧数据库的平台约束，保留已有客户端、证书授权和配置。插件升级与客户端 Agent 更新是独立操作；需要更新代理时，在客户端管理中下发 Agent 更新指令。
 
 ### 从源码构建
 
@@ -88,6 +114,8 @@ bash bin/build-package.sh
 - 数据库只保存令牌的 SHA-256 哈希；
 - 注册令牌 30 分钟后失效且只能成功使用一次；
 - 注册完成后交换为该设备独立、可撤销的长期凭据。
+
+OpenWRT 请以 root 在设备终端执行生成的安装命令，首次下载前需已有 `curl` 和可用的 HTTPS CA。新增或修改 OpenWRT 客户端时，只能选择托管证书目录或自定义下载目录；更换平台后，需要安装对应平台的代理。
 
 来源限制可填写 IPv4、IPv6 或域名。填写域名时，服务端会在每次请求时解析其 A/AAAA 记录，只要任一解析地址与请求来源地址完全一致即可放行。
 
@@ -115,6 +143,7 @@ bash bin/build-package.sh
 
 - [Linux Agent 说明](./client/linux/README.md)
 - [Windows Agent 说明](./client/windows/README.md)
+- [OpenWRT Agent 说明](./client/openwrt/README.md)
 
 ## License
 
