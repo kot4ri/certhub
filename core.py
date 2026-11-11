@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS clients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_uuid TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
-  platform TEXT NOT NULL CHECK(platform IN ('linux','windows')),
+  platform TEXT NOT NULL CHECK(platform IN ('linux','windows','openwrt')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','active','revoked')),
   auth_token_hash TEXT,
   hostname TEXT,
@@ -267,6 +267,37 @@ def initialize():
             for name, sql in migrations.items():
                 if name not in columns:
                     db.execute(sql)
+            db.commit()
+            table_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='clients'").fetchone()[0]
+            if "'openwrt'" not in table_sql:
+                db.execute('PRAGMA foreign_keys=OFF')
+                try:
+                    db.execute('BEGIN IMMEDIATE')
+                    table_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='clients'").fetchone()[0]
+                    if "'openwrt'" not in table_sql:
+                        new_sql = re.sub(r"CHECK\s*\(\s*platform\s+IN\s*\([^)]*\)\s*\)",
+                                         "CHECK(platform IN ('linux','windows','openwrt'))", table_sql, flags=re.I)
+                        if new_sql == table_sql:
+                            raise CertHubError('无法迁移客户端平台约束')
+                        sequence = db.execute("SELECT seq FROM sqlite_sequence WHERE name='clients'").fetchone()
+                        extras = db.execute("SELECT sql FROM sqlite_master WHERE tbl_name='clients' AND type IN ('index','trigger') AND sql IS NOT NULL").fetchall()
+                        db.execute(re.sub(r'^CREATE TABLE\s+["`\[]?clients["`\]]?', 'CREATE TABLE clients_new', new_sql, count=1, flags=re.I))
+                        names = ','.join('"' + row['name'] + '"' for row in db.execute('PRAGMA table_info(clients)'))
+                        db.execute('INSERT INTO clients_new (%s) SELECT %s FROM clients' % (names, names))
+                        db.execute('DROP TABLE clients')
+                        db.execute('ALTER TABLE clients_new RENAME TO clients')
+                        if sequence:
+                            db.execute("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='clients'", (sequence[0],))
+                        for extra in extras:
+                            db.execute(extra[0])
+                        if db.execute('PRAGMA foreign_key_check').fetchone():
+                            raise CertHubError('客户端平台迁移后外键检查失败')
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                finally:
+                    db.execute('PRAGMA foreign_keys=ON')
             # Recover cleanup ownership for clients upgraded from agents which did
             # not remember the bt-panel ssl_saved record created by save_by_file.
             legacy = db.execute('''SELECT DISTINCT p.client_id,c.sans_json FROM pull_events p
@@ -504,7 +535,7 @@ class ClientService(object):
         name = (name or '').strip()
         if not name or len(name) > 190:
             raise CertHubError('客户端名称无效')
-        if client_platform not in ('linux', 'windows'):
+        if client_platform not in ('linux', 'windows', 'openwrt'):
             raise CertHubError('客户端平台无效')
         panel_url = setting('panel_base_url').strip().rstrip('/')
         if not panel_url:
@@ -532,7 +563,10 @@ class ClientService(object):
             row = db.execute('SELECT platform,status FROM clients WHERE id=?', (client_id,)).fetchone()
             if not row:
                 raise CertHubError('客户端不存在')
-            config = self.validate_config(row['platform'], options or {})
+            client_platform = str((options or {}).get('platform') or row['platform'])
+            if client_platform not in ('linux', 'windows', 'openwrt'):
+                raise CertHubError('客户端平台无效')
+            config = self.validate_config(client_platform, options or {})
             selected_ids = sorted(set(int(x) for x in certificate_ids if int(x) > 0))
             old_rows = db.execute('''SELECT c.id,c.sans_json FROM grants g JOIN certificates c ON c.id=g.certificate_id
                                      WHERE g.client_id=? AND g.effect='allow' ''', (client_id,)).fetchall()
@@ -551,8 +585,8 @@ class ClientService(object):
                                (client_id, key, key, token_urlsafe(24), now))
                 elif key in selected_sans:
                     db.execute('DELETE FROM certificate_cleanup_tasks WHERE client_id=? AND san_key=?', (client_id, key))
-            db.execute('''UPDATE clients SET name=?,allowed_ip=?,deploy_mode=?,download_path=?,auto_deploy_sites=?,sync_interval_seconds=?,sync_schedule=?,config_updated_at=? WHERE id=?''',
-                       (name, config['allowed_ip'], config['deploy_mode'], config['download_path'], config['auto_deploy_sites'], config['sync_interval_seconds'], config['sync_schedule'], now, client_id))
+            db.execute('''UPDATE clients SET name=?,platform=?,allowed_ip=?,deploy_mode=?,download_path=?,auto_deploy_sites=?,sync_interval_seconds=?,sync_schedule=?,config_updated_at=? WHERE id=?''',
+                       (name, client_platform, config['allowed_ip'], config['deploy_mode'], config['download_path'], config['auto_deploy_sites'], config['sync_interval_seconds'], config['sync_schedule'], now, client_id))
             db.execute('DELETE FROM grants WHERE client_id=?', (client_id,))
             for certificate_id in selected_ids:
                 db.execute("INSERT INTO grants(client_id,certificate_id,effect,updated_at) VALUES(?,?, 'allow',?)", (client_id, certificate_id, now))
@@ -601,7 +635,7 @@ class ClientService(object):
         schedule = str(options.get('sync_schedule') or '0 * * * *').strip()
         validate_cron(schedule)
         return {'allowed_ip': allowed_ip or None, 'deploy_mode': deploy_mode, 'download_path': download_path,
-                'auto_deploy_sites': 1 if str(options.get('auto_deploy_sites', '0')).lower() in ('1', 'true', 'yes') else 0,
+                'auto_deploy_sites': 1 if client_platform == 'linux' and str(options.get('auto_deploy_sites', '0')).lower() in ('1', 'true', 'yes') else 0,
                 'sync_interval_seconds': 3600, 'sync_schedule': schedule}
 
     def reissue_enrollment(self, client_id):
@@ -629,6 +663,10 @@ class ClientService(object):
             encoded = base64.urlsafe_b64encode(endpoint.encode('utf-8')).decode('ascii').rstrip('=')
             filename = 'certhub-setup..%s..%s.exe' % (encoded, enrollment)
             command = "$u='%s';$t='%s';$p=Join-Path $env:TEMP '%s';try{Invoke-WebRequest -UseBasicParsing -Method Post -Uri $u -Body @{token=$t} -OutFile $p}catch{& curl.exe -4 -fSL -X POST --data-urlencode \"token=$t\" $u -o $p;if($LASTEXITCODE -ne 0){throw}};Start-Process -FilePath $p -Verb RunAs" % (install_url.replace("'", "''"), enrollment, filename)
+        elif client_platform == 'openwrt':
+            install_url = None
+            url = "%s?action=install_openwrt" % endpoint
+            command = "{ curl -fsS -X POST --data-urlencode 'token=%s' '%s' -o /tmp/certhub-install.sh || curl -4 -fsS -X POST --data-urlencode 'token=%s' '%s' -o /tmp/certhub-install.sh; } && sh /tmp/certhub-install.sh" % (enrollment, url, enrollment, url)
         else:
             install_url = None
             url = "%s?action=install_linux" % endpoint
@@ -681,7 +719,7 @@ class ClientService(object):
             now = utcnow()
             now_epoch = int(time.time())
             supports_rotation = version_at_least(self.field(info, 'agent_version', row['agent_version']),
-                                                 '0.3.15' if row['platform'] == 'linux' else '0.3.13')
+                                                 '0.3.15' if row['platform'] != 'windows' else '0.3.13')
             expired = bool(current_match and row['auth_token_expires_at'] and row['auth_token_expires_at'] <= now_epoch)
             if expired and (action != 'pull' or not supports_rotation):
                 raise CertHubError('客户端认证凭据已过期')
@@ -768,11 +806,11 @@ class ClientService(object):
             with open(info_path, 'r', encoding='utf-8') as handle:
                 info = json.load(handle)
                 version = info.get(row['platform'] + '_agent_version') or info.get('versions') or ''
-            relative = ('windows/certhub-agent.exe' if row['platform'] == 'windows' else 'linux/agent')
+            relative = ('windows/certhub-agent.exe' if row['platform'] == 'windows' else row['platform'] + '/agent')
             binary_path = os.path.join(PLUGIN_DIR, 'client', *relative.split('/'))
             with open(binary_path, 'rb') as handle:
                 digest = hashlib.sha256(handle.read()).hexdigest()
-            action = 'client_windows_binary' if row['platform'] == 'windows' else 'client_linux'
+            action = 'client_windows_binary' if row['platform'] == 'windows' else 'client_' + row['platform']
             result['update'] = {'command_token': row['update_token'], 'version': version, 'sha256': digest,
                                 'url': setting('panel_base_url').rstrip('/') + '/certhub-api?action=' + action}
         result.pop('platform', None); result.pop('update_token', None); result.pop('cleanup_token', None)

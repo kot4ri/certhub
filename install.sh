@@ -15,7 +15,7 @@ install_certhub() {
     command -v openssl >/dev/null || { echo 'ERROR: 缺少 OpenSSL。' >&2; exit 1; }
     find "$PLUGIN_DIR" -type d -exec chmod 0755 {} +
     find "$PLUGIN_DIR" -type f -exec chmod 0644 {} +
-    chmod 0755 "$PLUGIN_DIR/install.sh" "$PLUGIN_DIR/update.sh" "$PLUGIN_DIR/uninstall.sh" "$PLUGIN_DIR/bin/build-package.sh" "$PLUGIN_DIR/client/linux/install.sh" "$PLUGIN_DIR/client/linux/agent"
+    chmod 0755 "$PLUGIN_DIR/install.sh" "$PLUGIN_DIR/update.sh" "$PLUGIN_DIR/uninstall.sh" "$PLUGIN_DIR/bin/build-package.sh" "$PLUGIN_DIR/client/linux/install.sh" "$PLUGIN_DIR/client/linux/agent" "$PLUGIN_DIR/client/openwrt/install.sh" "$PLUGIN_DIR/client/openwrt/agent" "$PLUGIN_DIR/client/openwrt/certhub-agent.init"
     install -d -m 0700 -o root -g root "$DATA_DIR"
     CERTHUB_DATA_DIR="$DATA_DIR" PYTHONPATH="$PLUGIN_DIR" "$BT_PYTHON" -c 'from core import initialize; initialize()'
     install -d -m 0700 -o root -g root "$(dirname "$HOOK_FILE")"
@@ -28,7 +28,7 @@ install_certhub() {
     if [[ "${CERTHUB_SKIP_RESTART:-0}" != "1" ]]; then
         nohup bash -c 'sleep 3; /etc/init.d/bt restart' >/dev/null 2>&1 &
     fi
-    echo 'CertHub 1.3.2 安装完成。面板将在数秒后重启并注册 /certhub-api。'
+    echo 'CertHub 1.4.0 安装完成。面板将在数秒后重启并注册 /certhub-api。'
 }
 
 uninstall_certhub() {

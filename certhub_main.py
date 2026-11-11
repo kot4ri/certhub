@@ -168,7 +168,8 @@ class certhub_main(object):
             packages = {}
             for platform_name, relative, action in (
                     ('windows', 'client/windows/certhub-agent.exe', 'client_windows_binary'),
-                    ('linux', 'client/linux/agent', 'client_linux')):
+                    ('linux', 'client/linux/agent', 'client_linux'),
+                    ('openwrt', 'client/openwrt/agent', 'client_openwrt')):
                 path = os.path.join(PLUGIN_DIR, *relative.split('/'))
                 with open(path, 'rb') as package:
                     digest = hashlib.sha256(package.read()).hexdigest()
@@ -177,6 +178,8 @@ class certhub_main(object):
                     command = "$u='%s';$p=\"$env:TEMP\\certhub-agent-update.exe\";$d=\"$env:ProgramData\\CertHub\\certhub-agent.exe\";try{Invoke-WebRequest -UseBasicParsing $u -OutFile $p}catch{& curl.exe -4 -fSL $u -o $p;if($LASTEXITCODE -ne 0){throw}};if((Get-FileHash $p -Algorithm SHA256).Hash -ne '%s'){throw \"文件校验失败\"};schtasks.exe /End /TN \"CertHub Certificate Sync\" 2>$null;Get-Process certhub-agent -ErrorAction SilentlyContinue|Stop-Process -Force;Start-Sleep -Seconds 2;Copy-Item $p $d -Force;Start-Process $d -ArgumentList \"--scheduled\" -Wait;schtasks.exe /Run /TN \"CertHub Certificate Sync\"" % (url.replace("'", "''"), digest.upper())
                 else:
                     command = "curl -fsS '%s' -o /tmp/certhub-agent.update && echo '%s  /tmp/certhub-agent.update' | sha256sum -c - && sudo systemctl stop certhub-agent.service && sudo install -m 0755 /tmp/certhub-agent.update /usr/local/sbin/certhub-agent && sudo systemctl start certhub-agent.service" % (url.replace("'", "'\\''"), digest)
+                if platform_name == 'openwrt':
+                    command = "curl -fsS '%s' -o /usr/local/sbin/.certhub-agent.update && echo '%s  /usr/local/sbin/.certhub-agent.update' | sha256sum -c - && bash -n /usr/local/sbin/.certhub-agent.update && chmod 755 /usr/local/sbin/.certhub-agent.update && /etc/init.d/certhub-agent stop && mv /usr/local/sbin/.certhub-agent.update /usr/local/sbin/certhub-agent && /etc/init.d/certhub-agent start" % (url.replace("'", "'\\''"), digest)
                 packages[platform_name] = command
             with connect() as db:
                 rows = [dict(row) for row in db.execute('''SELECT id,client_uuid,name,platform,status,hostname,os_name,os_version,architecture,agent_version,last_ip,last_seen_at,created_at,
@@ -213,6 +216,7 @@ class certhub_main(object):
             if not isinstance(ids, list):
                 raise CertHubError('证书权限参数无效')
             options = {key: self.value(get, key, '') for key in ('allowed_ip', 'deploy_mode', 'download_path', 'auto_deploy_sites', 'sync_schedule')}
+            options['platform'] = self.value(get, 'platform', '')
             ClientService().update(int(self.value(get, 'id', 0)), self.value(get, 'name', ''), ids, options)
             return self.ok(None, '客户端配置已更新')
         return self.guard(run)

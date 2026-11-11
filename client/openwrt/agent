@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+CONFIG=/etc/certhub-agent/config.json
+STATE=/etc/certhub-agent/state
+POLL_SECONDS=300
+
+cfg(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$CONFIG" "$1"; }
+system_json(){ python3 - <<'PY'
+import json,platform
+i={'hostname':platform.node(),'os_name':'OpenWrt','os_version':platform.platform(),'architecture':platform.machine(),'agent_version':'0.3.20'}
+try:
+ for line in open('/etc/os-release'):
+  if line.startswith('PRETTY_NAME='):i['os_version']=line.split('=',1)[1].strip().strip('"');break
+except OSError:pass
+print(json.dumps(i,separators=(',',':')))
+PY
+}
+
+curl_with_ipv4_fallback(){
+  curl "$@" || {
+    echo 'IPv6/默认网络请求失败，正在回落到 IPv4 重试。' >&2
+    curl -4 "$@"
+  }
+}
+
+sync_once(){
+  local force=${1:-0} api client token sysinfo response interval last now payload
+  [[ -f $STATE/initial-sync-complete ]] || force=1
+  api=$(cfg api_endpoint); client=$(cfg client_id); token=$(cfg auth_token); sysinfo=$(system_json)
+  local auth_file
+  auth_file=$(mktemp "$STATE/.headers.XXXXXX")
+  chmod 0600 "$auth_file"
+  printf 'X-CertHub-Client: %s\nAuthorization: Bearer %s\nContent-Type: application/json\n' "$client" "$token" > "$auth_file"
+  local auth=(-H "@$auth_file")
+  trap 'rm -f "${auth_file:-}"' RETURN EXIT
+  response=$(mktemp "$STATE/.pull.XXXXXX")
+  payload=$(printf '{"system":%s}' "$sysinfo")
+  if ! curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=pull" -o "$response";then
+    rm -f "$response";return 1
+  fi
+  python3 - "$response" "$STATE/server-config.json" "$CONFIG" <<'PY'
+import json,os,sys
+r=json.load(open(sys.argv[1]));d=r.get('data') or {};c=d.get('config') or {}
+if c.get('deploy_mode','files-only') not in ('files-only','custom'):raise SystemExit('OpenWRT 仅支持托管目录或自定义目录')
+rotation=c.pop('auth_token_rotation',{}) or {};new_token=rotation.get('token') or ''
+if new_token:
+ client=json.load(open(sys.argv[3]));client['auth_token']=new_token
+ tmp=sys.argv[3]+'.new';json.dump(client,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,sys.argv[3])
+tmp=sys.argv[2]+'.new';json.dump(c,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,sys.argv[2])
+PY
+  mapfile -t update_info < <(python3 - "$STATE/server-config.json" <<'PY'
+import json,sys
+u=json.load(open(sys.argv[1])).get('update') or {}
+for key in ('command_token','version','sha256','url'):print(u.get(key) or '')
+PY
+)
+  if [[ -n ${update_info[0]:-} ]]; then
+    if [[ ${update_info[1]} == 0.3.20 ]]; then
+      payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
+      curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
+    else
+      update_file=$(mktemp /usr/local/sbin/.certhub-agent-update.XXXXXX)
+      curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${update_info[3]}" -o "$update_file"
+      python3 - "$update_file" "${update_info[2]}" <<'PY'
+import hashlib,sys
+if hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()!=sys.argv[2].lower():raise SystemExit('客户端更新文件校验失败')
+PY
+      chmod 0755 "$update_file";python3 - "$update_file" /usr/local/sbin/certhub-agent <<'PY'
+import os,sys
+os.replace(sys.argv[1],sys.argv[2])
+PY
+      payload=$(printf '{"command_token":"%s","system":%s}' "${update_info[0]}" "$sysinfo")
+      curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_update" >/dev/null
+      /etc/init.d/certhub-agent restart >/dev/null 2>&1 &
+      exit 0
+    fi
+  fi
+  read -r cleanup_token deployment_changed < <(python3 - "$STATE/server-config.json" "$STATE/deployment-state.json" "$STATE/certificates" <<'PY'
+import json,os,shutil,sys
+config=json.load(open(sys.argv[1]));state_path=sys.argv[2]
+try: state=json.load(open(state_path))
+except Exception: state={}
+managed={str(k):v for k,v in (state.get('managed_by_certificate') or {}).items() if isinstance(v,str)}
+for cert_id,value in managed.items():
+ try:
+  path=os.path.realpath(value);marker=os.path.join(path,'.certhub-managed')
+  if not os.path.exists(marker) and os.path.isfile(os.path.join(path,'fullchain.pem')) and os.path.isfile(os.path.join(path,'privkey.pem')):
+   open(marker,'w').write(cert_id+'\n');os.chmod(marker,0o600)
+ except Exception:pass
+def clear(items):
+ for cert_id,value in items.items():
+  try:
+   path=os.path.realpath(value)
+   marker=os.path.join(path,'.certhub-managed')
+   if path.startswith('/') and len([x for x in path.split('/') if x])>=2 and open(marker).read().strip()==cert_id:
+    for name in ('fullchain.pem','privkey.pem','info.json','.certhub-managed'):
+     try:os.unlink(os.path.join(path,name))
+     except FileNotFoundError:pass
+    try:os.rmdir(path)
+    except OSError:pass
+  except Exception:pass
+cleanup=(config.get('cleanup') or {}).get('command_token') or ''
+signature=json.dumps({'mode':config.get('deploy_mode') or 'files-only','path':config.get('download_path') or ''},sort_keys=True,separators=(',',':'))
+changed=state.get('signature')!=signature
+if cleanup or changed:clear(managed)
+if cleanup:shutil.rmtree(sys.argv[3],ignore_errors=True)
+if cleanup or changed:
+ tmp=state_path+'.new';json.dump({'signature':signature,'managed_paths':[]},open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,state_path)
+print(cleanup or '-',1 if changed else 0)
+PY
+)
+  if [[ $cleanup_token != - ]]; then
+    payload=$(printf '{"command_token":"%s","system":%s}' "$cleanup_token" "$sysinfo")
+    curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_cleanup" >/dev/null
+    rm -f "$response";return 0
+  fi
+  local certificate_cleanup_tokens
+  if ! certificate_cleanup_tokens=$(python3 - "$STATE/server-config.json" <<'PY'
+import json,sys
+config=json.load(open(sys.argv[1]))
+print(json.dumps([str(t['command_token']) for t in config.get('certificate_cleanup',[]) if t.get('command_token')],separators=(',',':')))
+PY
+); then
+    echo '证书清理失败，保留任务以便下次重试。' >&2
+    rm -f "$response";return 1
+  fi
+  if [[ $certificate_cleanup_tokens != '[]' ]]; then
+    payload=$(printf '{"command_tokens":%s,"system":%s}' "$certificate_cleanup_tokens" "$sysinfo")
+    curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_certificate_cleanup" >/dev/null
+  fi
+  python3 - "$response" "$STATE/server-config.json" "$STATE/deployment-state.json" "$STATE/certificate-versions.json" "$STATE/certificates" <<'PY'
+import hashlib,json,os,re,shutil,sys
+response_path,config_path,state_path,versions_path,cert_root=sys.argv[1:6]
+items=(json.load(open(response_path)).get('data') or {}).get('certificates',[])
+config=json.load(open(config_path))
+try: state=json.load(open(state_path))
+except Exception: state={}
+try: versions=json.load(open(versions_path))
+except Exception: versions={}
+managed={str(k):v for k,v in (state.get('managed_by_certificate') or {}).items() if isinstance(v,str)}
+legacy=set(v for v in (state.get('managed_paths') or []) if isinstance(v,str))
+authorized={str(item['id']):item for item in items}
+def clear_destination(path,cert_id):
+ path=os.path.realpath(path)
+ if not path.startswith('/') or len([x for x in path.split('/') if x])<2:return
+ try:
+  if open(os.path.join(path,'.certhub-managed')).read().strip()!=str(cert_id):return
+ except OSError:return
+ for name in ('fullchain.pem','privkey.pem','info.json','.certhub-managed'):
+  try:os.unlink(os.path.join(path,name))
+  except FileNotFoundError:pass
+ try:os.rmdir(path)
+ except OSError:pass
+def expected_path(item):
+ mode=config.get('deploy_mode') or 'files-only'
+ if mode=='custom':
+  base=config.get('download_path') or ''
+  if not base.startswith('/'):return None
+  return os.path.realpath(os.path.join(base,re.sub(r'[^A-Za-z0-9._-]','_',item.get('name') or str(item.get('id')))))
+ return None
+for cert_id,item in authorized.items():
+ expected=expected_path(item)
+ if expected and (managed.get(cert_id)==expected or expected in legacy):managed[cert_id]=expected
+authorized_paths={expected_path(item) for item in authorized.values()};authorized_paths.discard(None)
+for cert_id in set(str(k) for k in versions)-set(authorized):
+ item=None
+ current=os.path.join(cert_root,cert_id,'current','bundle.json')
+ try:item=(json.load(open(current)).get('data') or {})
+ except Exception:pass
+ expected=expected_path(item) if item else None
+ candidate=managed.get(cert_id) or (expected if expected in legacy else None)
+ if candidate and (not expected or os.path.realpath(candidate)==expected) and os.path.realpath(candidate) not in authorized_paths:
+  clear_destination(candidate,cert_id)
+ shutil.rmtree(os.path.join(cert_root,cert_id),ignore_errors=True)
+ versions.pop(cert_id,None);managed.pop(cert_id,None)
+state['managed_by_certificate']=managed
+state['managed_paths']=sorted(set(managed.values()))
+for path,data in ((versions_path,versions),(state_path,state)):
+ tmp=path+'.new';json.dump(data,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,path)
+PY
+  now=$(date +%s);last_check=$((now-POLL_SECONDS));[[ -f $STATE/last-schedule-check ]] && read -r last_check < "$STATE/last-schedule-check"
+  read -r due command_token < <(python3 - "$STATE/server-config.json" "$last_check" "$now" "$force" <<'PY'
+import datetime,json,sys
+config=json.load(open(sys.argv[1]));previous,now,forced=map(int,sys.argv[2:5]);expression=config.get('sync_schedule') or '0 * * * *'
+def values(field,low,high):
+ out=set()
+ for part in field.split(','):
+  base,_,step=part.partition('/');step=int(step or 1)
+  if base=='*':start,end=low,high
+  elif '-' in base:start,end=map(int,base.split('-',1))
+  else:start=end=int(base)
+  out.update(range(start,end+1,step))
+ return out
+def matches(ts):
+ minute,hour,day,month,weekday=expression.split();d=datetime.datetime.fromtimestamp(ts);dow=(d.weekday()+1)%7;week=values(weekday,0,7)
+ date=(d.day in values(day,1,31)) and (dow in week or (dow==0 and 7 in week)) if day=='*' or weekday=='*' else (d.day in values(day,1,31)) or (dow in week or (dow==0 and 7 in week))
+ return d.minute in values(minute,0,59) and d.hour in values(hour,0,23) and d.month in values(month,1,12) and date
+scheduled=any(matches(m*60) for m in range(max(previous//60+1,now//60-10080),now//60+1));token=config.get('force_sync_token') or ''
+print(1 if forced or token or scheduled else 0,token or '-')
+PY
+)
+  printf '%s\n' "$now" > "$STATE/last-schedule-check"
+  if [[ $due != 1 ]]; then rm -f "$response";return 0;fi
+  mapfile -t cert_jobs < <(python3 - "$response" "$STATE/certificate-versions.json" "$force" "$command_token" "$deployment_changed" <<'PY'
+import json,sys
+items=(json.load(open(sys.argv[1])).get('data') or {}).get('certificates',[])
+try: known=json.load(open(sys.argv[2]))
+except Exception: known={}
+forced=sys.argv[3]=='1' or sys.argv[4]!='-' or sys.argv[5]=='1'
+print('\n'.join(str(x['id'])+' '+str(x.get('version') or '') for x in items if forced or known.get(str(x['id']))!=x.get('version')))
+PY
+)
+  for cert_job in "${cert_jobs[@]}";do
+    [[ -n $cert_job ]] || continue
+    local cert_id expected_version
+    read -r cert_id expected_version <<< "$cert_job"
+    local work
+    work=$(mktemp -d "$STATE/.stage.XXXXXX")
+    printf '{"certificate_id":%s,"system":%s}' "$cert_id" "$sysinfo" > "$work/request.json"
+    curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "@$work/request.json" "$api?action=bundle" -o "$work/bundle.json"
+    python3 - "$work" "$STATE" "$STATE/server-config.json" <<'PY'
+import json,os,re,shutil,subprocess,sys,time
+work,state,config_path=sys.argv[1:4];d=(json.load(open(work+'/bundle.json')).get('data') or {})
+if not d.get('fullchain_pem') or not d.get('private_key_pem'):raise SystemExit('证书响应无效')
+for key,name,mode in [('fullchain_pem','fullchain.pem',0o644),('private_key_pem','privkey.pem',0o600)]:
+ p=work+'/'+name;open(p,'w').write(d[key]);os.chmod(p,mode)
+subprocess.run(['openssl','x509','-in',work+'/fullchain.pem','-noout','-checkend','86400'],check=True)
+cert_pub=subprocess.check_output(['openssl','x509','-in',work+'/fullchain.pem','-pubkey','-noout'])
+key_pub=subprocess.check_output(['openssl','pkey','-in',work+'/privkey.pem','-pubout'])
+if cert_pub!=key_pub:raise SystemExit('证书与私钥不匹配')
+version=d['version'];cert_id=str(d['certificate_id']);final=os.path.join(state,'certificates',cert_id,version)
+os.makedirs(os.path.dirname(final),mode=0o700,exist_ok=True)
+for name in ('request.json','bundle.json'):
+ try:os.unlink(os.path.join(work,name))
+ except FileNotFoundError:pass
+if not os.path.isdir(final):os.rename(work,final)
+else:shutil.rmtree(work,ignore_errors=True)
+current=os.path.join(state,'certificates',cert_id,'current');tmp=current+'.new'
+try:os.unlink(tmp)
+except FileNotFoundError:pass
+os.symlink(final,tmp);os.replace(tmp,current)
+config=json.load(open(config_path));deploy_mode=config.get('deploy_mode','files-only');managed_path=None
+def atomic_copy(src,dst,perm):
+ os.makedirs(os.path.dirname(dst),mode=0o750,exist_ok=True);new=dst+'.certhub-new';shutil.copyfile(src,new);os.chmod(new,perm);os.replace(new,dst)
+if deploy_mode=='custom':
+ base=config.get('download_path') or ''
+ if not base.startswith('/') or '/../' in base+'/':raise SystemExit('服务端下发的下载路径不安全')
+ target=os.path.join(base,re.sub(r'[^A-Za-z0-9._-]','_',d.get('name') or cert_id))
+ atomic_copy(final+'/fullchain.pem',target+'/fullchain.pem',0o644);atomic_copy(final+'/privkey.pem',target+'/privkey.pem',0o600)
+ managed_path=target
+if managed_path:
+ marker=os.path.join(managed_path,'.certhub-managed');open(marker,'w').write(cert_id+'\n');os.chmod(marker,0o600)
+ state_path=state+'/deployment-state.json'
+ try: deployment=json.load(open(state_path))
+ except Exception: deployment={}
+ managed=deployment.get('managed_by_certificate') or {};managed[cert_id]=managed_path
+ deployment['managed_by_certificate']=managed;deployment['managed_paths']=sorted(set(managed.values()));tmp=state_path+'.new';json.dump(deployment,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,state_path)
+PY
+    python3 - "$STATE/certificate-versions.json" "$cert_id" "$expected_version" <<'PY'
+import json,os,sys
+path,cert_id,version=sys.argv[1:4]
+try: data=json.load(open(path))
+except Exception: data={}
+data[cert_id]=version;tmp=path+'.new';json.dump(data,open(tmp,'w'),separators=(',',':'));os.chmod(tmp,0o600);os.replace(tmp,path)
+PY
+  done
+  if [[ $command_token != - ]]; then
+    payload=$(printf '{"command_token":"%s","system":%s}' "$command_token" "$sysinfo")
+    curl_with_ipv4_fallback --fail --silent --show-error --proto '=https' --tlsv1.2 "${auth[@]}" --data-binary "$payload" "$api?action=ack_sync" >/dev/null
+  fi
+  printf '%s\n' "$now" > "$STATE/last-sync"
+  : > "$STATE/initial-sync-complete"
+  chmod 0600 "$STATE/initial-sync-complete"
+  rm -f "$response"
+}
+
+mkdir -p "$STATE" /var/lock
+case "${1:-daemon}" in
+ sync)exec 9>/var/lock/certhub-agent.lock;flock -n 9||exit 0;sync_once 1;;
+ daemon)exec 9>/var/lock/certhub-agent.lock;flock -n 9||exit 0;while true;do sync_once 0||true;sleep "$POLL_SECONDS";done;;
+ *)echo 'Usage: certhub-agent {daemon|sync}' >&2;exit 2;;
+esac

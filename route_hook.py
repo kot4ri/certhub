@@ -46,7 +46,7 @@ def handle_request():
         service = ClientService()
         ip = public.GetClientIp()
         if request.method == 'GET' and action == 'health':
-            return response({'status': True, 'data': {'service': 'CertHub', 'version': '1.3.2'}})
+            return response({'status': True, 'data': {'service': 'CertHub', 'version': '1.4.0'}})
         if request.method == 'GET' and action == 'author_avatar':
             path = os.path.join(PLUGIN_DIR, 'assets', 'kot4ri.jpg')
             with open(path, 'rb') as handle:
@@ -95,19 +95,19 @@ def handle_request():
             params = dict(request.form.items())
             result = getattr(certhub_main(), method)(SimpleNamespace(**params))
             return response(result)
-        if request.method == 'POST' and action in ('install_linux', 'install_windows'):
+        if request.method == 'POST' and action in ('install_linux', 'install_windows', 'install_openwrt'):
             token = request.values.get('token', '')
             if len(token) < 32 or not all(ch.isalnum() or ch in '_-' for ch in token):
                 raise CertHubError('安装凭据无效')
-            platform_name = 'linux' if action == 'install_linux' else 'windows'
-            filename = 'install.sh' if platform_name == 'linux' else 'install.bat'
+            platform_name = action[len('install_'):]
+            filename = 'install.sh' if platform_name != 'windows' else 'install.bat'
             path = os.path.join(PLUGIN_DIR, 'client', platform_name, filename)
             with open(path, 'r', encoding='utf-8') as handle:
                 script = handle.read()
             endpoint = setting('panel_base_url').rstrip('/') + '/certhub-api'
             script = script.replace('@@API_ENDPOINT@@', endpoint).replace('@@ENROLLMENT_TOKEN@@', token)
-            content_type = 'text/x-shellscript' if platform_name == 'linux' else 'application/x-bat'
-            return response(script, 200, content_type, {'Content-Disposition': 'attachment; filename="certhub-install.%s"' % ('sh' if platform_name == 'linux' else 'bat')})
+            content_type = 'text/x-shellscript' if platform_name != 'windows' else 'application/x-bat'
+            return response(script, 200, content_type, {'Content-Disposition': 'attachment; filename="certhub-install.%s"' % ('sh' if platform_name != 'windows' else 'bat')})
         if request.method == 'POST' and action == 'install_windows_exe':
             token = request.values.get('token', '')
             if len(token) < 32 or not all(ch.isalnum() or ch in '_-' for ch in token):
@@ -127,6 +127,8 @@ def handle_request():
             with open(path, 'rb') as handle:
                 return response(handle.read(), 200, 'application/vnd.microsoft.portable-executable', {'Content-Disposition': 'attachment; filename="certhub-agent.exe"'})
         static_clients = {
+            'client_openwrt': ('openwrt/agent', 'text/x-shellscript'),
+            'client_openwrt_service': ('openwrt/certhub-agent.init', 'text/plain'),
             'client_linux': ('linux/agent', 'text/x-shellscript'),
             'client_linux_service': ('linux/certhub-agent.service', 'text/plain'),
             'client_windows': ('windows/agent.ps1', 'text/plain'),

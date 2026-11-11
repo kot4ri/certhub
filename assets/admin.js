@@ -422,12 +422,14 @@
           '<div class="row"><label>客户端名称</label><input type="text" class="name" value="' +
           esc(c.name || "") +
           '"></div><div class="row"><label>平台</label><select class="platform" ' +
-          (edit ? "disabled" : "") +
+          "" +
           '><option value="linux" ' +
           ((c.platform || "linux") === "linux" ? "selected" : "") +
           '>Linux</option><option value="windows" ' +
           (c.platform === "windows" ? "selected" : "") +
-          '>Windows</option></select></div><div class="row"><label>允许使用的证书（可多选）</label><div class="checks">' +
+          '>Windows</option><option value="openwrt" ' +
+          (c.platform === "openwrt" ? "selected" : "") +
+          '>OpenWRT</option></select><p class="muted">更换平台后，请在客户端安装对应平台的代理。</p></div><div class="row"><label>允许使用的证书（可多选）</label><div class="checks">' +
           certs
             .map(
               (x) =>
@@ -472,7 +474,12 @@
         mode.add(homeOption, 0);
         const refresh = () => {
           const windows = platform.value === "windows";
-          btOption.hidden = windows;
+          btOption.hidden = platform.value !== "linux";
+          btOption.disabled = btOption.hidden;
+          if (btOption.hidden && mode.value === "bt-panel") mode.value = "files-only";
+          filesOption.textContent = platform.value === "openwrt"
+            ? "持久化证书目录（/etc/certhub-agent/state/certificates）"
+            : "服务托管证书目录";
           filesOption.hidden = windows;
           homeOption.hidden = !windows;
           if (windows && ["bt-panel", "files-only"].includes(mode.value))
@@ -484,7 +491,7 @@
           m.querySelector(".path-row").style.display =
             mode.value === "custom" ? "block" : "none";
           m.querySelector(".bt-row").style.display =
-            !windows && mode.value === "bt-panel" ? "block" : "none";
+            platform.value === "linux" && mode.value === "bt-panel" ? "block" : "none";
         };
         if (c.deploy_mode === "user-home") mode.value = "user-home";
         mode.onchange = platform.onchange = limit.onchange = refresh;
